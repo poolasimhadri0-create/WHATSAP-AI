@@ -19,3 +19,5 @@ services:
         value: "true"
       - key: PORT
         value: 3001
+      - key: APP_URL
+        value: https://whatsap-ai.onrender.com

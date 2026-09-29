@@ -75,7 +75,7 @@ async function startWhatsAppSocket() {
         creds: state.creds,
         keys: makeCacheableSignalKeyStore(state.keys, logger),
       },
-      browser: Browsers.windows('Desktop'),
+      browser: Browsers.ubuntu('Chrome'),
       syncFullHistory: false,
       markOnlineOnConnect: true,
       generateHighQualityLinkPreview: false,
@@ -393,4 +393,18 @@ app.post('/logout', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`[WhatsApp Web Bridge Server] Listening on http://localhost:${PORT}`);
   startWhatsAppSocket();
+
+  // Cloud Keep-Alive: Prevents Render free instances from going to sleep
+  const externalUrl = process.env.RENDER_EXTERNAL_URL || process.env.APP_URL;
+  if (externalUrl) {
+    console.log(`[Cloud Keep-Alive] Initialized self-pinging every 10m for ${externalUrl}`);
+    setInterval(async () => {
+      try {
+        await axios.get(`${externalUrl}/status`, { timeout: 10000 });
+        console.log(`[Cloud Keep-Alive] Successfully pinged ${externalUrl}/status`);
+      } catch (e) {
+        console.log(`[Cloud Keep-Alive] Ping notice: ${e.message}`);
+      }
+    }, 10 * 60 * 1000); // Every 10 minutes
+  }
 });
