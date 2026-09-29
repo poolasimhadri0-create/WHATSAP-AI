@@ -137,19 +137,6 @@ async function startWhatsAppSocket() {
     }
   });
 
-  // Track when messages are marked read on phone (user opened chat)
-  sock.ev.on('messages.update', async (updates) => {
-    for (const u of updates) {
-      if (u.update?.status === 3 || u.update?.status === 4) {
-        const remoteJid = u.key?.remoteJid;
-        if (remoteJid && !u.key?.fromMe) {
-          lastPhoneActionTime = Date.now();
-          humanActiveUntil.set(remoteJid, Date.now() + (CONVERSATION_PAUSE_SECONDS * 1000));
-        }
-      }
-    }
-  });
-
   // Listen for incoming messages
   sock.ev.on('messages.upsert', async (m) => {
     logToFile(`[messages.upsert] type=${m.type}, count=${m.messages?.length || 0}`);
@@ -170,8 +157,6 @@ async function startWhatsAppSocket() {
 
       // If fromMe is true: YOU sent a message on your phone!
       if (msg.key.fromMe) {
-        lastPhoneActionTime = Date.now();
-
         if (isSelfChat) {
           // Self-chat commands: !off / !on / !status
           const selfText = (msg.message?.conversation || msg.message?.extendedTextMessage?.text || '').trim().toLowerCase();
@@ -255,17 +240,6 @@ async function startWhatsAppSocket() {
         continue;
       } else if (pausedUntil && Date.now() >= pausedUntil) {
         humanActiveUntil.delete(remoteJid);
-      }
-
-      // If user was active on phone in any chat in the last 5 seconds, wait a moment
-      const timeSincePhoneAction = Date.now() - lastPhoneActionTime;
-      if (timeSincePhoneAction < 5000 && !isSelfChat) {
-        console.log(`⏳ [Phone Active] WhatsApp opened/active. Waiting 5s before AI answers...`);
-        await new Promise((resolve) => setTimeout(resolve, 5000 - timeSincePhoneAction));
-        if (humanActiveUntil.get(remoteJid) > Date.now()) {
-          console.log(`👤 [Human Replied] You sent a message. Skipping AI reply.`);
-          continue;
-        }
       }
 
       const logHeader = isGroup ? `[Group Inbound]` : (isSelfChat ? `[Self-Chat Inbound]` : `[WhatsApp Inbound]`);
