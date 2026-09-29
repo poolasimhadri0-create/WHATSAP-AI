@@ -1,0 +1,30 @@
+# Virtual environments
+venv/
+backend/venv/
+.venv/
+
+# Node dependencies
+node_modules/
+frontend/node_modules/
+whatsapp-bridge/node_modules/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Local databases and logs
+*.log
+*.db
+backend/whatsapp_ai.db
+
+# WhatsApp session local auth (mounted via docker volume instead)
+whatsapp-bridge/auth_info_baileys/
+
+# Git & OS artifacts
+.git/
+.gitignore
+.DS_Store
+Thumbs.db

@@ -1,0 +1,26 @@
+services:
+  whatsapp_ai_bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: whatsapp_ai_bot
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+      - "3001:3001"
+    environment:
+      - LLM_PROVIDER=gemini
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-AQ.Ab8RN6KG-SlOWZ5n4OdRfAcER5G946yJsR5MSuE4Yyi6j7FEVg}
+      - LLM_MODEL=gemini-3.8-flash
+      - TYPING_DELAY_ENABLED=False
+      - SQLITE_URL=sqlite+aiosqlite:////app/backend/data/whatsapp_ai.db
+      - FALLBACK_TO_SQLITE=True
+      - FASTAPI_URL=http://127.0.0.1:8000/api/v1/bridge/incoming
+    volumes:
+      # Persistent storage for WhatsApp QR login session & database
+      - whatsapp_session_data:/app/whatsapp-bridge/auth_info_baileys
+      - whatsapp_db_data:/app/backend/data
+
+volumes:
+  whatsapp_session_data:
+  whatsapp_db_data:

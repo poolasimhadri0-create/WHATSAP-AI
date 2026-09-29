@@ -1,0 +1,20 @@
+{
+  "name": "whatsapp-web-qr-bridge",
+  "version": "1.0.0",
+  "description": "WhatsApp Web QR Code bridge for linking personal WhatsApp to FastAPI + Gemini AI",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.12",
+    "axios": "^1.7.2",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "pino": "^9.2.0",
+    "qrcode": "^1.5.3",
+    "qrcode-terminal": "^0.12.0"
+  }
+}

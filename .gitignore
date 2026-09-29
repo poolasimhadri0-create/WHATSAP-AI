@@ -1,0 +1,38 @@
+# Virtual environments
+venv/
+backend/venv/
+.venv/
+env/
+
+# Node modules & build
+node_modules/
+frontend/node_modules/
+whatsapp-bridge/node_modules/
+frontend/dist/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+
+# Databases & local sessions
+*.db
+backend/whatsapp_ai.db
+whatsapp-bridge/auth_info_baileys/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Environment secrets
+.env
+backend/.env
+*.env
+
+# OS artifacts
+.DS_Store
+Thumbs.db
