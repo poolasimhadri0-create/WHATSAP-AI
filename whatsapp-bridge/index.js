@@ -292,8 +292,12 @@ async function startWhatsAppSocket() {
       if (!remoteJid || remoteJid.includes('@broadcast') || remoteJid.includes('@newsletter')) continue;
 
       // 🚫 STRICT RULE: NEVER reply or chat in WhatsApp groups!
-      if (remoteJid.endsWith('@g.us') || remoteJid.includes('@g.us')) {
-        continue;
+      const isGroupMessage = remoteJid.endsWith('@g.us') || 
+                             remoteJid.includes('@g.us') || 
+                             Boolean(msg.key.participant) || 
+                             Boolean(msg.participant);
+      if (isGroupMessage) {
+        continue; // Completely ignore all group messages
       }
 
       // Don't reply to our own AI outbound messages
@@ -381,26 +385,13 @@ async function startWhatsAppSocket() {
 
       const senderPhone = remoteJid.replace('@s.whatsapp.net', '').replace('@g.us', '').replace('@lid', '');
       const senderName = msg.pushName || (isSelfChat ? 'You' : 'WhatsApp User');
-      const isGroup = remoteJid.endsWith('@g.us');
-
-      // ----------------------------------------------------
-      // Blacklist / Ignored Check (Groups & Specific Numbers)
-      // ----------------------------------------------------
-      const blacklist = getBlacklistConfig();
-
-      // Check if group is ignored
+      const isGroup = remoteJid.endsWith('@g.us') || remoteJid.includes('@g.us') || Boolean(msg.key.participant) || Boolean(msg.participant);
       if (isGroup) {
-        if (blacklist.ignore_all_groups) {
-          console.log(`👥 [Group Ignored] AI auto-reply is disabled for groups. Skipping group chat: ${remoteJid}`);
-          continue;
-        }
-        if (isGroupIgnored(remoteJid, blacklist.ignored_groups)) {
-          console.log(`👥 [Group Ignored] Group ${remoteJid} is in blacklist. Skipping AI auto-reply.`);
-          continue;
-        }
+        continue;
       }
 
-      // Check if phone number (or group participant) is blacklisted
+      // Check if phone number is blacklisted
+      const blacklist = getBlacklistConfig();
       const participant = msg.key.participant ? msg.key.participant.replace('@s.whatsapp.net', '').replace('@lid', '') : null;
       if (isNumberIgnored(senderPhone, blacklist.ignored_numbers) || (participant && isNumberIgnored(participant, blacklist.ignored_numbers))) {
         const blockedNumber = isNumberIgnored(senderPhone, blacklist.ignored_numbers) ? senderPhone : participant;

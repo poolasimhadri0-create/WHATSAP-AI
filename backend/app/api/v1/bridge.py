@@ -77,7 +77,7 @@ async def handle_bridge_incoming_message(
         }
 
     # Strict protection: Never reply to groups
-    if "g.us" in payload.sender_phone or "group" in payload.sender_phone.lower():
+    if "g.us" in payload.sender_phone or "group" in payload.sender_phone.lower() or "-" in payload.sender_phone:
         return {
             "reply": None,
             "handoff": False,
