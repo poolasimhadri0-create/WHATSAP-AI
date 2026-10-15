@@ -127,7 +127,8 @@ async function startWhatsAppSocket() {
         creds: state.creds,
         keys: makeCacheableSignalKeyStore(state.keys, logger),
       },
-      browser: Browsers.macOS('Desktop'),
+      browser: Browsers.ubuntu('Chrome'),
+
       syncFullHistory: false,
       markOnlineOnConnect: false,
       generateHighQualityLinkPreview: false,
@@ -426,33 +427,121 @@ app.get('/qr', (req, res) => {
       <p style="color:#8696a0;">Please wait a moment...</p>
     </body></html>`);
   }
-  res.send(`<!DOCTYPE html><html><head><title>Scan WhatsApp QR Code</title><meta name="viewport" content="width=device-width,initial-scale=1"></head><body style="font-family:system-ui,-apple-system,sans-serif;text-align:center;padding:30px 15px;background:#0b141a;color:#e9edef;">
-    <div style="max-width:440px;margin:0 auto;background:#111b21;padding:26px 20px;border-radius:16px;box-shadow:0 8px 24px rgba(0,0,0,0.5);">
-      <h2 style="color:#25D366;margin:0 0 8px;font-size:22px;">Scan with WhatsApp</h2>
-      <p style="color:#8696a0;margin:0 0 16px;font-size:13px;">WhatsApp &gt; Settings &gt; Linked Devices &gt; Link a Device</p>
-      <div style="background:#ffffff;display:inline-block;padding:14px;border-radius:12px;">
-        <img src="${currentQRDataURL}" width="280" height="280" style="display:block;" />
+  res.send(`<!DOCTYPE html><html><head><title>Link WhatsApp AI</title><meta name="viewport" content="width=device-width,initial-scale=1"></head><body style="font-family:system-ui,-apple-system,sans-serif;text-align:center;padding:24px 14px;background:#0b141a;color:#e9edef;">
+    <div style="max-width:440px;margin:0 auto;background:#111b21;padding:24px 20px;border-radius:16px;box-shadow:0 8px 24px rgba(0,0,0,0.5);">
+      <h2 style="color:#25D366;margin:0 0 4px;font-size:22px;">Link WhatsApp with Meera AI</h2>
+      <p style="color:#8696a0;margin:0 0 18px;font-size:13px;">Choose either method below to connect your WhatsApp</p>
+
+      <!-- Option 1: Pairing Code -->
+      <div style="background:#1f2c34;padding:16px;border-radius:12px;margin-bottom:20px;text-align:left;">
+        <h3 style="color:#25D366;margin:0 0 6px;font-size:15px;">⚡ Method 1: Link with Phone Number (Recommended)</h3>
+        <p style="color:#8696a0;font-size:12px;margin:0 0 10px;line-height:1.4;">Enter your WhatsApp number (with country code, no +) to get an 8-character code:</p>
+        <div style="display:flex;gap:8px;">
+          <input type="tel" id="phoneInput" placeholder="e.g. 919000495107" style="flex:1;padding:10px 12px;border-radius:8px;border:1px solid #2a3942;background:#111b21;color:#fff;font-size:14px;outline:none;" />
+          <button onclick="requestPairCode()" id="pairBtn" style="background:#25D366;color:#111b21;border:none;padding:10px 16px;border-radius:8px;font-weight:bold;cursor:pointer;font-size:13px;">Get Code</button>
+        </div>
+        <div id="codeDisplay" style="display:none;margin-top:14px;background:#111b21;padding:14px;border-radius:10px;text-align:center;border:1px solid #25D366;">
+          <div style="font-size:11px;color:#8696a0;margin-bottom:4px;">ENTER THIS 8-DIGIT CODE IN WHATSAPP:</div>
+          <div id="codeText" style="font-size:28px;font-weight:bold;letter-spacing:4px;color:#25D366;font-family:monospace;padding:6px 0;"></div>
+          <p style="font-size:11px;color:#8696a0;margin:6px 0 0;line-height:1.4;">
+            👉 In WhatsApp on phone: <b>Settings &gt; Linked Devices &gt; Link a Device &gt; Link with phone number instead</b>
+          </p>
+        </div>
+        <div id="codeError" style="display:none;color:#f15c6d;font-size:12px;margin-top:10px;"></div>
       </div>
-      <p style="color:#8696a0;font-size:12px;margin:16px 0 0;">Auto-refreshes when linked.</p>
-      <div style="margin-top:18px;padding-top:16px;border-top:1px solid #202c33;">
-        <p style="font-size:12px;color:#f15c6d;margin:0 0 10px;">⚠️ Seeing <b>"Could not connect, try again later"</b> on your phone?</p>
-        <p style="font-size:11px;color:#8696a0;margin:0 0 12px;text-align:left;line-height:1.5;">
-          1. On your phone: Go to <b>Linked Devices</b> and <b>Log Out</b> any old active session.<br>
-          2. Click the button below to generate a fresh QR code:
+
+      <!-- Option 2: QR Code -->
+      <div style="border-top:1px solid #202c33;padding-top:16px;">
+        <h3 style="color:#8696a0;margin:0 0 12px;font-size:14px;">📷 Method 2: Scan QR Code</h3>
+        <div style="background:#ffffff;display:inline-block;padding:12px;border-radius:12px;">
+          <img src="${currentQRDataURL}" width="230" height="230" style="display:block;" />
+        </div>
+        <p style="color:#8696a0;font-size:11px;margin:12px 0 0;">WhatsApp &gt; Linked Devices &gt; Link a Device &gt; Scan QR</p>
+      </div>
+
+      <!-- Reset & Troubleshoot -->
+      <div style="margin-top:20px;padding-top:14px;border-top:1px solid #202c33;">
+        <p style="font-size:11px;color:#8696a0;margin:0 0 10px;">
+          Seeing <i>"Could not connect"</i>? Log out old devices in WhatsApp first, then click:
         </p>
-        <a href="/reset" style="background:#ea4335;color:#ffffff;text-decoration:none;padding:9px 18px;border-radius:8px;font-size:13px;display:inline-block;font-weight:600;">🔄 Reset Session & Get New QR</a>
+        <a href="/reset" style="background:#ea4335;color:#ffffff;text-decoration:none;padding:8px 16px;border-radius:8px;font-size:12px;display:inline-block;font-weight:600;">🔄 Reset Session & Refresh</a>
       </div>
     </div>
+
     <script>
+      async function requestPairCode() {
+        const phone = document.getElementById('phoneInput').value.trim();
+        const errDiv = document.getElementById('codeError');
+        const codeDiv = document.getElementById('codeDisplay');
+        const codeText = document.getElementById('codeText');
+        const btn = document.getElementById('pairBtn');
+
+        errDiv.style.display = 'none';
+        codeDiv.style.display = 'none';
+
+        if (!phone) {
+          errDiv.textContent = 'Please enter your phone number with country code (e.g. 919000495107)';
+          errDiv.style.display = 'block';
+          return;
+        }
+
+        btn.disabled = true;
+        btn.textContent = 'Generating...';
+
+        try {
+          const res = await fetch('/pair-code', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ phone: phone })
+          });
+          const data = await res.json();
+          if (data.code) {
+            codeText.textContent = data.code;
+            codeDiv.style.display = 'block';
+          } else {
+            errDiv.textContent = data.error || data.message || 'Could not generate code. Please try again.';
+            errDiv.style.display = 'block';
+          }
+        } catch (err) {
+          errDiv.textContent = 'Network error: ' + err.message;
+          errDiv.style.display = 'block';
+        } finally {
+          btn.disabled = false;
+          btn.textContent = 'Get Code';
+        }
+      }
+
       setInterval(async () => {
         try {
           const r = await fetch('/status');
           const d = await r.json();
           if (d.connected) { location.reload(); }
         } catch (_) {}
-      }, 2000);
+      }, 2500);
     </script>
   </body></html>`);
+});
+
+app.post('/pair-code', async (req, res) => {
+  try {
+    let { phone } = req.body || {};
+    if (!phone) {
+      return res.status(400).json({ error: 'Please enter your phone number with country code (e.g. 919000495107)' });
+    }
+    phone = String(phone).replace(/\D/g, '');
+    if (!sock) {
+      return res.status(503).json({ error: 'WhatsApp socket not ready. Please try again.' });
+    }
+    if (isConnected || sock.authState?.creds?.registered) {
+      return res.json({ registered: true, message: 'WhatsApp is already connected!' });
+    }
+    const code = await sock.requestPairingCode(phone);
+    console.log(`[Pairing Code] Generated code for +${phone}: ${code}`);
+    return res.json({ success: true, code });
+  } catch (err) {
+    console.error('Error requesting pairing code:', err);
+    return res.status(500).json({ error: err.message });
+  }
 });
 
 app.get('/reset', async (req, res) => {
@@ -482,6 +571,7 @@ app.get('/reset', async (req, res) => {
     return res.status(500).send(`Error resetting session: ${err.message}`);
   }
 });
+
 
 
 app.get('/blacklist', (req, res) => {
