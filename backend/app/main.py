@@ -1,7 +1,7 @@
 import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, Response
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select
 import httpx
@@ -103,8 +103,15 @@ app.add_middleware(
 
 BRIDGE_INTERNAL_URL = "http://127.0.0.1:3001"
 
+FAVICON_SVG = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><circle cx="50" cy="50" r="48" fill="#25D366"/><path d="M50 20C33.4 20 20 33.4 20 50c0 6.6 2.1 12.8 6 17.8L22 80l12.6-3.9C39.3 78.4 44.5 80 50 80c16.6 0 30-13.4 30-30S66.6 20 50 20zm14.8 41.5c-.6 1.8-3.1 3.4-4.8 3.8-1.2.3-2.7.5-8.4-1.9-7.3-3.1-12-10.4-12.4-10.9-.4-.5-3-4-3-7.7s1.9-5.5 2.6-6.3c.7-.7 1.6-.9 2.1-.9.5 0 1.1 0 1.6.1.5.1 1.2-.2 1.9 1.4.7 1.7 2.4 5.9 2.6 6.3.2.4.3.9.1 1.5-.2.5-.5.9-.8 1.2-.4.4-.8.9-.4 1.7.9 1.7 3.3 4.8 6.1 6.3 1.2.7 2.1.8 2.8.4.8-.4 2.2-2.6 2.8-3.5.6-.9 1.2-.8 2-.5.8.3 5.1 2.4 6 2.8.9.5 1.5.7 1.7 1.1.2.5.2 2.7-.4 4.5z" fill="#fff"/></svg>"""
+
 @app.api_route("/", methods=["GET", "HEAD"])
-async def root():
+async def root(request: Request):
+    # If opened in a web browser, automatically redirect to the WhatsApp QR link page
+    accept = request.headers.get("accept", "")
+    if "text/html" in accept and request.method == "GET":
+        return RedirectResponse(url="/qr")
+
     return {
         "status": "online",
         "service": "WhatsApp AI Engine (Gemini)",
@@ -115,7 +122,7 @@ async def root():
 
 @app.get("/favicon.ico", include_in_schema=False)
 async def favicon():
-    return Response(status_code=204)
+    return Response(content=FAVICON_SVG, media_type="image/svg+xml", status_code=200)
 
 async def fetch_from_bridge(method: str, path: str, json_data: dict = None, timeout: float = 10.0):
     for base in ["http://127.0.0.1:3001", "http://localhost:3001"]:
