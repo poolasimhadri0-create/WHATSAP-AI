@@ -178,6 +178,15 @@ async def bridge_logout_proxy():
     except Exception as e:
         return {"error": str(e)}
 
+@app.get("/logs")
+async def bridge_logs_proxy():
+    """Proxies live WhatsApp bridge logs."""
+    try:
+        resp = await fetch_from_bridge("GET", "/logs", timeout=10.0)
+        return Response(content=resp.content, status_code=resp.status_code, media_type="text/plain; charset=utf-8")
+    except Exception as e:
+        return Response(content=f"Error reading logs: {e}", status_code=500, media_type="text/plain")
+
 # 1. Direct Webhook Mounts (Meta WhatsApp standard endpoint: /webhook/whatsapp)
 app.include_router(webhook_router, prefix="/webhook", tags=["Meta WhatsApp Webhook"])
 

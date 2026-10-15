@@ -25,7 +25,7 @@ echo "-> Starting WhatsApp Web QR Bridge supervisor on port 3001..."
   cd /app/whatsapp-bridge
   while true; do
     echo "-> [Supervisor] Launching WhatsApp Bridge on port 3001..."
-    BRIDGE_PORT=3001 node index.js || true
+    FASTAPI_URL="http://127.0.0.1:${SERVER_PORT}/api/v1/bridge/incoming" BACKEND_PORT="${SERVER_PORT}" BRIDGE_PORT=3001 node index.js || true
     echo "-> [Supervisor] WhatsApp Bridge process exited. Auto-restarting in 2 seconds..."
     sleep 2
   done

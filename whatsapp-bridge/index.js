@@ -19,7 +19,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const PORT = process.env.BRIDGE_PORT || 3001;
-const FASTAPI_URL = process.env.FASTAPI_URL || 'http://127.0.0.1:8000/api/v1/bridge/incoming';
+const FASTAPI_URL = process.env.FASTAPI_URL || `http://127.0.0.1:${process.env.BACKEND_PORT || process.env.SERVER_PORT || (process.env.BRIDGE_PORT === process.env.PORT ? 8000 : process.env.PORT) || 8000}/api/v1/bridge/incoming`;
 
 const app = express();
 app.use(cors());
@@ -232,6 +232,14 @@ async function startWhatsAppSocket() {
       }
 
 
+      // Check if this is self-chat ("Message yourself") or incoming from someone else
+      const cleanOwnerPhone = cleanDigits(userPhone);
+      const myLid = sock.user?.lid ? sock.user.lid.split(':')[0] : '';
+      const isSelfChat = Boolean(
+        (cleanOwnerPhone && remoteJid.includes(cleanOwnerPhone)) ||
+        (myLid && remoteJid.includes(myLid))
+      );
+
       // If fromMe is true: YOU sent a message on your phone!
       if (msg.key.fromMe) {
         let content = msg.message;
@@ -271,12 +279,8 @@ async function startWhatsAppSocket() {
           continue;
         }
 
-        // 2. Check if this is self-chat ("Message yourself")
-        const myLid = sock.user?.lid ? sock.user.lid.split(':')[0] : '';
-        const isSelfChat = (cleanPhone && remoteJid.includes(cleanPhone)) || (myLid && remoteJid.includes(myLid));
-
+        // 2. If you sent a manual message to a contact: pause AI in this chat for 60s
         if (!isSelfChat) {
-          // You sent a manual message to a contact: pause AI in this chat for 60s
           const pauseUntil = Date.now() + (CONVERSATION_PAUSE_SECONDS * 1000);
           humanActiveUntil.set(remoteJid, pauseUntil);
           const cleanRecipient = remoteJid.replace('@s.whatsapp.net', '').replace('@g.us', '').replace('@lid', '');
