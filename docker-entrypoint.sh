@@ -19,10 +19,17 @@ BACKEND_PID=$!
 # Wait 2 seconds for backend to start up
 sleep 2
 
-# Start WhatsApp Web QR Bridge in background on fixed port 3001
-echo "-> Starting WhatsApp Web QR Bridge on port 3001..."
-cd /app/whatsapp-bridge
-BRIDGE_PORT=3001 node index.js &
+# Start WhatsApp Web QR Bridge in background on fixed port 3001 with auto-restart supervisor
+echo "-> Starting WhatsApp Web QR Bridge supervisor on port 3001..."
+(
+  cd /app/whatsapp-bridge
+  while true; do
+    echo "-> [Supervisor] Launching WhatsApp Bridge on port 3001..."
+    BRIDGE_PORT=3001 node index.js || true
+    echo "-> [Supervisor] WhatsApp Bridge process exited. Auto-restarting in 2 seconds..."
+    sleep 2
+  done
+) &
 BRIDGE_PID=$!
 
 # Trap signals for graceful shutdown

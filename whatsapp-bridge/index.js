@@ -25,6 +25,16 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+process.on('uncaughtException', (err) => {
+  console.error('[Bridge UncaughtException]:', err.message || err);
+  logToFile(`[UncaughtException] ${err.stack || err.message}`);
+});
+
+process.on('unhandledRejection', (reason) => {
+  console.error('[Bridge UnhandledRejection]:', reason);
+  logToFile(`[UnhandledRejection] ${reason}`);
+});
+
 let sock = null;
 let currentQR = null;
 let currentQRDataURL = null;
@@ -674,8 +684,8 @@ app.post('/logout', async (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`[WhatsApp Web Bridge Server] Listening on http://localhost:${PORT}`);
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`[WhatsApp Web Bridge Server] Listening on http://0.0.0.0:${PORT}`);
   startWhatsAppSocket();
 
   // Cloud Keep-Alive: Prevents Render free instances from going to sleep

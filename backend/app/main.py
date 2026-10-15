@@ -113,19 +113,30 @@ async def root():
         "whatsapp_bridge_status": "/status"
     }
 
+async def fetch_from_bridge(method: str, path: str, json_data: dict = None, timeout: float = 10.0):
+    for base in ["http://127.0.0.1:3001", "http://localhost:3001"]:
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                if method == "GET":
+                    return await client.get(f"{base}{path}")
+                elif method == "POST":
+                    return await client.post(f"{base}{path}", json=json_data)
+        except Exception:
+            continue
+    raise ConnectionError("Bridge connection refused on port 3001")
+
 @app.get("/qr", response_class=HTMLResponse)
 async def qr_proxy():
     """Proxies the WhatsApp QR linking page directly from the local bridge."""
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.get(f"{BRIDGE_INTERNAL_URL}/qr")
-            return HTMLResponse(content=resp.text, status_code=resp.status_code)
+        resp = await fetch_from_bridge("GET", "/qr", timeout=10.0)
+        return HTMLResponse(content=resp.text, status_code=resp.status_code)
     except Exception as e:
         return HTMLResponse(
             content=f"""<!DOCTYPE html><html><head><meta http-equiv="refresh" content="3"><title>Starting WhatsApp Bridge...</title></head>
             <body style="background:#0b141a;color:#fff;font-family:system-ui,-apple-system,sans-serif;text-align:center;padding:50px;">
-            <h2 style="color:#25D366;">WhatsApp Bridge is starting up...</h2>
-            <p style="color:#8696a0;">Please wait a moment while the bridge initializes. Auto-refreshing in 3 seconds...</p>
+            <h2 style="color:#25D366;">WhatsApp Bridge is initializing...</h2>
+            <p style="color:#8696a0;">Auto-refreshing in 3 seconds...</p>
             </body></html>""",
             status_code=200
         )
@@ -135,9 +146,8 @@ async def pair_code_proxy(request: Request):
     """Proxies the phone number pairing code generator to the bridge."""
     try:
         body = await request.json()
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.post(f"{BRIDGE_INTERNAL_URL}/pair-code", json=body)
-            return Response(content=resp.content, status_code=resp.status_code, media_type=resp.headers.get("content-type"))
+        resp = await fetch_from_bridge("POST", "/pair-code", json_data=body, timeout=15.0)
+        return Response(content=resp.content, status_code=resp.status_code, media_type=resp.headers.get("content-type"))
     except Exception as e:
         return {"error": str(e)}
 
@@ -145,9 +155,8 @@ async def pair_code_proxy(request: Request):
 async def bridge_status_proxy():
     """Proxies connection status."""
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.get(f"{BRIDGE_INTERNAL_URL}/status")
-            return Response(content=resp.content, status_code=resp.status_code, media_type=resp.headers.get("content-type"))
+        resp = await fetch_from_bridge("GET", "/status", timeout=5.0)
+        return Response(content=resp.content, status_code=resp.status_code, media_type=resp.headers.get("content-type"))
     except Exception as e:
         return {"connected": False, "status": "starting", "error": str(e)}
 
@@ -155,9 +164,8 @@ async def bridge_status_proxy():
 async def bridge_reset_proxy():
     """Proxies session reset."""
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.get(f"{BRIDGE_INTERNAL_URL}/reset")
-            return HTMLResponse(content=resp.text, status_code=resp.status_code)
+        resp = await fetch_from_bridge("GET", "/reset", timeout=10.0)
+        return HTMLResponse(content=resp.text, status_code=resp.status_code)
     except Exception as e:
         return HTMLResponse(content=f"Error resetting: {e}", status_code=500)
 
@@ -165,9 +173,8 @@ async def bridge_reset_proxy():
 async def bridge_logout_proxy():
     """Proxies logout."""
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.post(f"{BRIDGE_INTERNAL_URL}/logout")
-            return Response(content=resp.content, status_code=resp.status_code, media_type=resp.headers.get("content-type"))
+        resp = await fetch_from_bridge("POST", "/logout", timeout=10.0)
+        return Response(content=resp.content, status_code=resp.status_code, media_type=resp.headers.get("content-type"))
     except Exception as e:
         return {"error": str(e)}
 
