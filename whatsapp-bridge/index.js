@@ -409,7 +409,12 @@ async function startWhatsAppSocket() {
 // REST API Endpoints for Dashboard & Manual Agent Send
 // ----------------------------------------------------
 
+app.get('/', (req, res) => {
+  res.redirect('/qr');
+});
+
 app.get('/status', (req, res) => {
+
   res.json({
     connected: isConnected,
     phone: userPhone,
