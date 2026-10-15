@@ -504,9 +504,10 @@ app.get('/qr', (req, res) => {
       <div style="border-top:1px solid #202c33;padding-top:16px;">
         <h3 style="color:#8696a0;margin:0 0 12px;font-size:14px;">📷 Method 2: Scan QR Code</h3>
         <div style="background:#ffffff;display:inline-block;padding:12px;border-radius:12px;">
-          <img src="${currentQRDataURL}" width="230" height="230" style="display:block;" />
+          <img id="qrImg" src="${currentQRDataURL}" width="230" height="230" style="display:block;" />
         </div>
         <p style="color:#8696a0;font-size:11px;margin:12px 0 0;">WhatsApp &gt; Linked Devices &gt; Link a Device &gt; Scan QR</p>
+        <p style="color:#25D366;font-size:11px;margin:4px 0 0;">● Live QR (auto-refreshes every 20s)</p>
       </div>
 
       <!-- Reset & Troubleshoot -->
@@ -565,9 +566,16 @@ app.get('/qr', (req, res) => {
         try {
           const r = await fetch('/status');
           const d = await r.json();
-          if (d.connected) { location.reload(); }
+          if (d.connected) { 
+            location.reload(); 
+          } else if (d.qr) {
+            const img = document.getElementById('qrImg');
+            if (img && img.src !== d.qr) {
+              img.src = d.qr;
+            }
+          }
         } catch (_) {}
-      }, 2500);
+      }, 2000);
     </script>
   </body></html>`);
 });
