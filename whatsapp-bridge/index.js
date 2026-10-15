@@ -581,7 +581,20 @@ app.get('/reset', async (req, res) => {
 
 
 
+app.get('/logs', (req, res) => {
+  try {
+    const logPath = path.join(__dirname, 'bridge.log');
+    if (fs.existsSync(logPath)) {
+      return res.type('text/plain').send(fs.readFileSync(logPath, 'utf8'));
+    }
+    return res.type('text/plain').send('No logs yet.');
+  } catch (err) {
+    return res.status(500).send(err.message);
+  }
+});
+
 app.get('/blacklist', (req, res) => {
+
   res.json(getBlacklistConfig());
 });
 
