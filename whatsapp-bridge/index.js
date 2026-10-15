@@ -47,6 +47,58 @@ function logToFile(msg) {
   } catch (_) {}
 }
 
+// ----------------------------------------------------
+// Blacklist / Ignored Numbers & Groups Configuration
+// ----------------------------------------------------
+const BLACKLIST_FILE = path.join(__dirname, 'blacklist.json');
+
+function getBlacklistConfig() {
+  try {
+    if (fs.existsSync(BLACKLIST_FILE)) {
+      const data = fs.readFileSync(BLACKLIST_FILE, 'utf8');
+      return JSON.parse(data);
+    }
+  } catch (err) {
+    console.error('Error reading blacklist.json:', err.message);
+  }
+  return {
+    ignore_all_groups: true,
+    ignored_groups: [],
+    ignored_numbers: []
+  };
+}
+
+function cleanDigits(val) {
+  if (!val) return '';
+  return String(val).replace(/\D/g, '');
+}
+
+function isNumberIgnored(phone, ignoredNumbers = []) {
+  if (!phone || !Array.isArray(ignoredNumbers)) return false;
+  const cleanSender = cleanDigits(phone);
+  if (!cleanSender) return false;
+
+  return ignoredNumbers.some((num) => {
+    const cleanBlocked = cleanDigits(num);
+    if (!cleanBlocked) return false;
+    // Exact match or suffix match (e.g. without or with country code)
+    return cleanSender === cleanBlocked || 
+      (cleanSender.length >= 7 && cleanBlocked.length >= 7 && (cleanSender.endsWith(cleanBlocked) || cleanBlocked.endsWith(cleanSender)));
+  });
+}
+
+function isGroupIgnored(remoteJid, ignoredGroups = []) {
+  if (!remoteJid || !Array.isArray(ignoredGroups)) return false;
+  const cleanJid = String(remoteJid).toLowerCase().trim();
+
+  return ignoredGroups.some((item) => {
+    const cleanItem = String(item).toLowerCase().trim();
+    if (!cleanItem) return false;
+    return cleanJid.includes(cleanItem);
+  });
+}
+
+
 const logger = pino({ level: 'silent' });
 
 let isStartingSocket = false;
@@ -77,7 +129,7 @@ async function startWhatsAppSocket() {
       },
       browser: Browsers.ubuntu('Chrome'),
       syncFullHistory: false,
-      markOnlineOnConnect: true,
+      markOnlineOnConnect: false,
       generateHighQualityLinkPreview: false,
       getMessage: async (key) => {
         return { conversation: '' };
@@ -146,10 +198,16 @@ async function startWhatsAppSocket() {
       const remoteJid = msg.key.remoteJid;
       if (!remoteJid || remoteJid.includes('@broadcast') || remoteJid.includes('@newsletter')) continue;
 
+      // 🚫 STRICT RULE: NEVER reply or chat in WhatsApp groups!
+      if (remoteJid.endsWith('@g.us') || remoteJid.includes('@g.us')) {
+        continue;
+      }
+
       // Don't reply to our own AI outbound messages
       if (msg.key.id && sentMessageIds.has(msg.key.id)) {
         continue;
       }
+
 
       // Check if this is user messaging themselves ("Message yourself") or from external sender
       const cleanPhone = userPhone ? userPhone.replace('+', '').trim() : '';
@@ -208,6 +266,33 @@ async function startWhatsAppSocket() {
       const senderPhone = remoteJid.replace('@s.whatsapp.net', '').replace('@g.us', '').replace('@lid', '');
       const senderName = msg.pushName || (isSelfChat ? 'You' : 'WhatsApp User');
       const isGroup = remoteJid.endsWith('@g.us');
+
+      // ----------------------------------------------------
+      // Blacklist / Ignored Check (Groups & Specific Numbers)
+      // ----------------------------------------------------
+      const blacklist = getBlacklistConfig();
+
+      // Check if group is ignored
+      if (isGroup) {
+        if (blacklist.ignore_all_groups) {
+          console.log(`👥 [Group Ignored] AI auto-reply is disabled for groups. Skipping group chat: ${remoteJid}`);
+          continue;
+        }
+        if (isGroupIgnored(remoteJid, blacklist.ignored_groups)) {
+          console.log(`👥 [Group Ignored] Group ${remoteJid} is in blacklist. Skipping AI auto-reply.`);
+          continue;
+        }
+      }
+
+      // Check if phone number (or group participant) is blacklisted
+      const participant = msg.key.participant ? msg.key.participant.replace('@s.whatsapp.net', '').replace('@lid', '') : null;
+      if (isNumberIgnored(senderPhone, blacklist.ignored_numbers) || (participant && isNumberIgnored(participant, blacklist.ignored_numbers))) {
+        const blockedNumber = isNumberIgnored(senderPhone, blacklist.ignored_numbers) ? senderPhone : participant;
+        console.log(`🚫 [Blacklist Active] Contact +${blockedNumber} is in blacklist. Skipping AI auto-reply.`);
+        logToFile(`[Blacklist Active] Skipping AI auto-reply for +${blockedNumber}`);
+        continue;
+      }
+
 
       // Manual command triggers in any chat
       const lowerCmd = text.toLowerCase().trim();
@@ -272,10 +357,15 @@ async function startWhatsAppSocket() {
 
         // If AI produced a reply and handoff is not active, send it!
         if (res.data?.reply) {
+          if (remoteJid.endsWith('@g.us') || remoteJid.includes('@g.us')) {
+            console.log(`🚫 [Group Shield] Suppressed AI reply to group ${remoteJid}`);
+            continue;
+          }
           const aiReply = res.data.reply;
           console.log(`🤖 [Gemini AI Outbound] Replying to +${senderPhone}:\n"${aiReply}"\n`);
           logToFile(`[Outbound AI] Replying to +${senderPhone}: "${aiReply}"`);
           const sentResult = await sock.sendMessage(remoteJid, { text: aiReply });
+
           if (sentResult?.key?.id) {
             sentMessageIds.add(sentResult.key.id);
             if (sentMessageIds.size > 500) {
@@ -352,7 +442,26 @@ app.get('/qr', (req, res) => {
   </body></html>`);
 });
 
+app.get('/blacklist', (req, res) => {
+  res.json(getBlacklistConfig());
+});
+
+app.post('/blacklist', (req, res) => {
+  try {
+    const config = getBlacklistConfig();
+    const { ignore_all_groups, ignored_groups, ignored_numbers } = req.body;
+    if (typeof ignore_all_groups === 'boolean') config.ignore_all_groups = ignore_all_groups;
+    if (Array.isArray(ignored_groups)) config.ignored_groups = ignored_groups;
+    if (Array.isArray(ignored_numbers)) config.ignored_numbers = ignored_numbers;
+    fs.writeFileSync(BLACKLIST_FILE, JSON.stringify(config, null, 2), 'utf8');
+    return res.json({ success: true, config });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 app.post('/send', async (req, res) => {
+
   const { phone, text } = req.body;
   if (!sock || !isConnected) {
     return res.status(503).json({ error: 'WhatsApp not connected. Please scan QR code first.' });

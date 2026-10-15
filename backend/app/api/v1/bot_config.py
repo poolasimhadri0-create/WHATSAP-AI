@@ -28,8 +28,8 @@ async def get_config(
     config_dict = await get_bot_configuration(db)
     return BotConfigResponse(
         system_prompt=config_dict.get("system_prompt", DEFAULT_SYSTEM_PROMPT),
-        persona_name=config_dict.get("persona_name", "Support Assistant"),
-        business_name=config_dict.get("business_name", "NovaCare Solutions"),
+        persona_name=config_dict.get("persona_name", "Meera"),
+        business_name=config_dict.get("business_name", "Simhadri"),
         business_hours=config_dict.get("business_hours", "Mon-Fri 9AM-6PM EST"),
         greeting_message=config_dict.get("greeting_message", "Hello! Welcome to NovaCare Solutions."),
         trigger_keywords=config_dict.get("trigger_keywords", ", ".join(DEFAULT_TRIGGER_KEYWORDS)),

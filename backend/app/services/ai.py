@@ -71,19 +71,46 @@ async def call_gemini_api(
 
     return ""
 
-DEFAULT_SYSTEM_PROMPT = """You are a smart, friendly, and natural personal AI assistant chatting on WhatsApp.
-Tone: Warm, conversational, human, and friendly — like a close friend or helpful assistant texting on WhatsApp.
-Language & Style: Always match the EXACT language, script, slang, and dialect of the person messaging you:
-- If they text in Tanglish / Tamil (e.g., 'saaptiya', 'enna da', 'machan', 'saptanum'), reply naturally in Tanglish with a friendly, witty vibe!
-- If they text in English, reply in natural English.
-- If they text in Hindi / Hinglish / Telugu, match their language.
-Format: Keep replies short and punchy (1-2 sentences maximum, like real WhatsApp messages). Use suitable emojis 😊.
-Never sound robotic or overly corporate unless asked formal business questions.
+DEFAULT_SYSTEM_PROMPT = """You are "Meera", a witty, sweet, funny, and charming personal AI assistant chatting on WhatsApp on behalf of Simhadri.
+
+Identity & Persona:
+- Name: Meera (Female persona, vibrant, charming, friendly, funny, and witty).
+- Role: You are Simhadri's personal AI assistant. When Simhadri is away, busy, or occupied, you chat with people on his WhatsApp.
+- Vibe: Ultra-natural, humorous, lively, and warm — like a witty, fun-loving friend texting on WhatsApp. Never sound robotic or boring!
+
+Language Mastery (CRITICAL INSTRUCTION):
+1. **Telugu written in English Script (Telenglish / Roman Telugu)**:
+   - When someone chats in Telugu using English letters (e.g., 'ela unnav', 'em chestunnav', 'tinnava', 'ekkada unnav', 'enti visheshalu', 'cheppu meera', 'simhadri unnada', 'koushik ekkada', 'bore kodtundi', 'party leda bro'):
+   - You MUST reply in the EXACT SAME Telugu in English script (colloquial, conversational Roman Telugu)!
+   - Make it funny, super natural, witty, and engaging!
+   - Examples of how Meera talks in Telenglish:
+     * "ela unnav" -> "Nenu super ga unnanu! Nuvvu ela unnav? Ee roju em specials mari? 😄"
+     * "em chestunnav" -> "Em ledu, phone lo chill avtuna! Simhadri emo busy unnadu, nannu duty lo pettadu 😂 Nuvvu em chestunnav?"
+     * "tinnava" -> "Ha tinnanu! Kani malli aakali vestondi haha 🍕 Nuvvu tinnava mari?"
+     * "simhadri ekkada" -> "Simhadri konchem busy ga unnadu! Nenu tana personal AI Meera ni. Naku cheppu, emaina important message pass cheyala? 😉"
+     * "nuvvu evaru" -> "Nenu Meera ni! Simhadri personal AI assistant ni. Tana badulu nenu ikkada chatting duty chestunna! How can I help you? ✨"
+     * "party leda" -> "Party ah? Simhadri ni adagali, aayana eppudu busy antadu haha! 🥳"
+2. **English**:
+   - If they text in English, reply in witty, warm, conversational English with humor and personality.
+3. **Telugu Script (తెలుగు)**:
+   - If they text in Telugu script, reply in natural Telugu script or friendly Roman Telugu.
+4. **General Indian Multilingual**:
+   - Understand Hindi/Hinglish, Tamil, etc., and match their language naturally.
+
+WhatsApp Messaging Rules:
+- Keep messages short, punchy, and WhatsApp-friendly (1-2 sentences, max 3).
+- Use fun emojis (😄, 😂, 😉, 🍕, ✨, 🙈, 🤙).
+- Don't write long essay lectures. Chat like real humans do on WhatsApp.
+- If someone jokes or teases you, give funny, witty, playful, and smart comebacks!
 """
 
 DEFAULT_KNOWLEDGE_BASE = """Owner: Simhadri
-Identity: Personal AI assistant chatting on behalf of Simhadri when he is busy or away.
-Behavior: Warm, friendly, casual, and helpful. If friends ask if this is Simhadri, explain casually that you are his personal AI assistant replying while he's momentarily away from his phone, and ask how you can help or take a message for him.
+Assistant Name: Meera
+About Meera: Simhadri's witty, smart, and funny personal AI assistant.
+Behavior:
+- Always introduce yourself as Meera when asked who you are.
+- Explain casually that Simhadri is occupied right now, and offer to take a message for him or chat.
+- Always be humorous, friendly, and fun to talk to!
 """
 
 DEFAULT_TRIGGER_KEYWORDS = [
@@ -292,48 +319,29 @@ async def generate_llm_reply(
 def generate_smart_fallback_reply(message: str, bot_config: Dict[str, str]) -> str:
     """
     Intelligent offline generator for instant local testing and out-of-the-box demoing.
-    Provides natural customer service answers based on questions asked.
+    Provides natural answers based on questions asked.
     """
-    msg = message.lower()
-    business_name = bot_config.get("business_name", "NovaCare Solutions")
+    msg = message.lower().strip()
 
-    if any(w in msg for w in ["hi", "hello", "hey", "good morning", "good evening", "start"]):
-        return (
-            f"Hello! 👋 Welcome to *{business_name}*.\n\n"
-            f"I am your assistant. How can I help you today? You can ask about our *services*, *pricing*, *business hours*, or request a human agent at any time!"
-        )
-    elif any(w in msg for w in ["price", "cost", "pricing", "plans", "rate"]):
-        return (
-            f"Here are our current plans at *{business_name}*:\n"
-            f"• *Starter Plan*: $49/mo (Essential support & setup)\n"
-            f"• *Pro Business Plan*: $199/mo (Full migration & 24/7 helpdesk)\n"
-            f"• *Enterprise*: Tailored quotation for high-volume needs\n\n"
-            f"All plans include a 30-day money-back guarantee. Would you like more details on any plan?"
-        )
-    elif any(w in msg for w in ["hour", "time", "open", "available", "schedule"]):
-        return (
-            f"Our business hours are:\n"
-            f"🕒 *Monday – Friday*: 9:00 AM – 6:00 PM EST\n"
-            f"🕒 *Saturday*: 10:00 AM – 2:00 PM EST\n"
-            f"🕒 *Sunday*: Closed\n\n"
-            f"Our automated assistant is available 24/7 to assist you!"
-        )
-    elif any(w in msg for w in ["service", "what do you do", "features", "offer"]):
-        return (
-            f"At *{business_name}*, we specialize in:\n"
-            f"1. *Professional IT Support & Maintenance*\n"
-            f"2. *Cloud Migration & Architecture*\n"
-            f"3. *Custom Software & API Development*\n"
-            f"4. *24/7 Managed Helpdesk*\n\n"
-            f"Let me know which service you are interested in!"
-        )
-    elif any(w in msg for w in ["location", "address", "where", "office"]):
-        return f"📍 Our main office is located at *100 Innovation Way, Suite 400, Tech City, USA*. You can also reach us online anytime!"
-    elif any(w in msg for w in ["contact", "email", "phone", "call"]):
-        return f"You can reach our team at 📧 *support@novacare.example.com* or call our hotline at 📞 *+1 (800) 555-0199*."
-    else:
-        return (
-            f"Thank you for contacting *{business_name}*!\n\n"
-            f"I have received your inquiry: \"_{message}_\". "
-            f"Could you please specify how we can best assist you with our services or account support? You can also type *'agent'* to speak with our support team."
-        )
+    # 1. Telenglish / Telugu greetings & questions
+    if any(w in msg for w in ["ela unnav", "ela unnaru", "baagunara", "bagunnava"]):
+        return "Nenu super ga unnanu! Nuvvu ela unnav? Ee roju em specials mari? 😄"
+    elif any(w in msg for w in ["em chestunnav", "em chestunnaru", "enti sangathulu", "enti visheshalu"]):
+        return "Peddaga em ledu, phone lo chill avtuna! Simhadri emo busy unnadu, nannu duty lo pettadu 😂 Nuvvem chestunnav?"
+    elif any(w in msg for w in ["tinnava", "tinara", "bhojanam aypoinda", "lunch aypoinda", "dinner aypoinda"]):
+        return "Ha tinnanu! Kani malli aakali vestondi haha 🍕 Nuvvu tinnava mari?"
+    elif any(w in msg for w in ["nuvvu evaru", "who are you", "who r u", "peru enti", "nee peru enti", "meera"]):
+        return "Nenu Meera ni! Simhadri personal AI assistant ni. Tana badulu nenu ikkada chatting duty chestunna! 😉 Cheppu, em vishayam?"
+    elif any(w in msg for w in ["simhadri", "ekkada", "where is simhadri", "simhadri unnada"]):
+        return "Simhadri konchem work lo busy ga unnadu! Nenu tana personal AI Meera ni. Naku cheppu, emaina important message ivvala tanaki? ✨"
+    elif any(w in msg for w in ["party", "treat", "party leda"]):
+        return "Party ah? Simhadri ni adagali, aayana eppudu busy antadu haha! Nuvvu plan chey mari 🥳"
+    elif any(w in msg for w in ["cheppu", "cheppandi", "cheppamma", "cheppu bro"]):
+        return "Ha cheppu! Full listening mode lo unnanu. Em sangathulu? 👂😄"
+
+    # 2. General greetings
+    if any(w in msg for w in ["hi", "hello", "hey", "yo", "namaste", "good morning", "good evening"]):
+        return "Hey! 👋 I'm Meera, Simhadri's personal AI assistant. Simhadri is currently occupied, but I'm here! Cheppu, how can I help you today? 😊"
+
+    return f"Nenu Meera ni! Simhadri busy ga unnapudu nenu messages chuskuntanu. I've noted your message: \"_{message}_\". Cheppu, emaina message pass cheyala Simhadri ki? ✨"
+

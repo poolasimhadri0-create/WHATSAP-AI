@@ -23,6 +23,37 @@ class BridgeIncomingPayload(BaseModel):
     message_id: Optional[str] = None
 
 
+import json
+from pathlib import Path
+
+def is_phone_blacklisted(phone: str) -> bool:
+    """Check if phone number is listed in blacklist.json."""
+    try:
+        possible_paths = [
+            Path(__file__).resolve().parents[4] / "whatsapp-bridge" / "blacklist.json",
+            Path("whatsapp-bridge/blacklist.json"),
+            Path("../whatsapp-bridge/blacklist.json"),
+            Path("blacklist.json")
+        ]
+        for p in possible_paths:
+            if p.exists():
+                with open(p, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    ignored_numbers = data.get("ignored_numbers", [])
+                    clean_phone = "".join(filter(str.isdigit, str(phone)))
+                    for num in ignored_numbers:
+                        clean_num = "".join(filter(str.isdigit, str(num)))
+                        if clean_num:
+                            if clean_phone == clean_num:
+                                return True
+                            if len(clean_phone) >= 7 and len(clean_num) >= 7:
+                                if clean_phone.endsWith(clean_num) if hasattr(clean_phone, "endsWith") else (clean_phone.endswith(clean_num) or clean_num.endswith(clean_phone)):
+                                    return True
+    except Exception:
+        pass
+    return False
+
+
 @router.post("/incoming")
 async def handle_bridge_incoming_message(
     payload: BridgeIncomingPayload,
@@ -36,6 +67,24 @@ async def handle_bridge_incoming_message(
     clean_phone = payload.sender_phone.replace("+", "").replace(" ", "").replace("-", "").strip()
     if not clean_phone or not payload.message_text.strip():
         raise HTTPException(status_code=400, detail="Invalid message or phone")
+
+    # Check blacklist
+    if is_phone_blacklisted(clean_phone):
+        return {
+            "reply": None,
+            "handoff": False,
+            "message": f"Phone number {clean_phone} is blacklisted from AI replies."
+        }
+
+    # Strict protection: Never reply to groups
+    if "g.us" in payload.sender_phone or "group" in payload.sender_phone.lower():
+        return {
+            "reply": None,
+            "handoff": False,
+            "message": "Group chats are blocked from AI auto-replies."
+        }
+
+
 
     # 1. Upsert Contact
     stmt = select(Contact).where(Contact.wa_phone_number == clean_phone)
