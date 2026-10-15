@@ -42,12 +42,12 @@ let isConnected = false;
 let userPhone = null;
 const sentMessageIds = new Set();
 
-// Smart Auto-Pause & Chat Takeover Settings
+// Smart Auto-Pause & Chat Takeover Settings (Owner Active Guard)
 const humanActiveUntil = new Map();
 let globalPauseAllUntil = 0;
-let lastPhoneActionTime = 0;
-const CONVERSATION_PAUSE_SECONDS = 60; // When you text in a chat, pause AI for 60s
-const INCOMING_REPLY_DELAY_SECONDS = 5; // When away, AI replies in 5s
+let lastOwnerActiveTime = 0;
+let isOwnerOnline = false;
+const OWNER_INACTIVITY_DELAY_SECONDS = 10; // Exactly 10s after closing WhatsApp, AI automatically activates!
 
 function logToFile(msg) {
   try {
@@ -250,6 +250,38 @@ async function startWhatsAppSocket() {
     }
   });
 
+  // 1. Detect when owner opens or closes WhatsApp on phone
+  sock.ev.on('presence.update', (update) => {
+    const cleanOwner = cleanDigits(userPhone);
+    const myLid = sock.user?.lid ? sock.user.lid.split(':')[0] : '';
+    const { id, presences } = update || {};
+
+    for (const [jid, p] of Object.entries(presences || {})) {
+      const cleanJid = cleanDigits(jid);
+      const isOwner = (cleanOwner && cleanJid.includes(cleanOwner)) || 
+                      (myLid && jid.includes(myLid)) || 
+                      (cleanOwner && id && cleanDigits(id).includes(cleanOwner));
+      if (isOwner) {
+        if (p.lastKnownPresence === 'available' || p.lastKnownPresence === 'composing') {
+          isOwnerOnline = true;
+          lastOwnerActiveTime = Date.now();
+          console.log('👤 [Owner in WhatsApp] You opened WhatsApp (Online). AI auto-reply paused.');
+          logToFile('[Presence] Owner online. AI auto-reply paused.');
+        } else if (p.lastKnownPresence === 'unavailable') {
+          isOwnerOnline = false;
+          lastOwnerActiveTime = Date.now();
+          console.log(`👤 [Owner in WhatsApp] You closed WhatsApp. AI will auto-activate in ${OWNER_INACTIVITY_DELAY_SECONDS}s.`);
+          logToFile(`[Presence] Owner closed WhatsApp. Auto-activating in ${OWNER_INACTIVITY_DELAY_SECONDS}s.`);
+        }
+      }
+    }
+  });
+
+  // 2. Detect when owner reads messages on phone (blue ticks / receipts)
+  sock.ev.on('message-receipt.update', () => {
+    lastOwnerActiveTime = Date.now();
+  });
+
   // Listen for incoming messages
   sock.ev.on('messages.upsert', async (m) => {
     logToFile(`[messages.upsert] type=${m.type}, count=${m.messages?.length || 0}`);
@@ -317,13 +349,14 @@ async function startWhatsAppSocket() {
           continue;
         }
 
-        // 2. If you sent a manual message to a contact: pause AI in this chat for 60s
+        // 2. You sent a message from your phone: owner is active in WhatsApp!
+        lastOwnerActiveTime = Date.now();
         if (!isSelfChat) {
-          const pauseUntil = Date.now() + (CONVERSATION_PAUSE_SECONDS * 1000);
+          const pauseUntil = Date.now() + (OWNER_INACTIVITY_DELAY_SECONDS * 1000);
           humanActiveUntil.set(remoteJid, pauseUntil);
           const cleanRecipient = remoteJid.replace('@s.whatsapp.net', '').replace('@g.us', '').replace('@lid', '');
-          console.log(`👤 [Human Active] You sent a message to +${cleanRecipient}. AI paused in this chat for ${CONVERSATION_PAUSE_SECONDS}s.`);
-          logToFile(`[Human Active] Manual message to +${cleanRecipient}. Paused AI for ${CONVERSATION_PAUSE_SECONDS}s.`);
+          console.log(`👤 [Owner in WhatsApp] You sent a message to +${cleanRecipient}. AI stopped for ${OWNER_INACTIVITY_DELAY_SECONDS}s.`);
+          logToFile(`[Owner Active] Manual message to +${cleanRecipient}. Paused AI for ${OWNER_INACTIVITY_DELAY_SECONDS}s.`);
         }
         continue;
       }
@@ -399,11 +432,23 @@ async function startWhatsAppSocket() {
         continue;
       }
 
-      // Smart Chat Takeover: If human is actively chatting in this conversation
+      // 1. OWNER ACTIVE GUARD: When you are active in WhatsApp, AI stops.
+      // After you close WhatsApp for 10 seconds, AI automatically activates!
+      const timeSinceOwnerActive = Date.now() - lastOwnerActiveTime;
+      const isOwnerCurrentlyActive = isOwnerOnline || (timeSinceOwnerActive < (OWNER_INACTIVITY_DELAY_SECONDS * 1000));
+
+      if (isOwnerCurrentlyActive && !isSelfChat) {
+        const remainingSec = Math.max(1, Math.ceil(((OWNER_INACTIVITY_DELAY_SECONDS * 1000) - timeSinceOwnerActive) / 1000));
+        console.log(`👤 [Owner in WhatsApp] You are active in WhatsApp. AI stopped (${remainingSec}s until auto-activation).`);
+        logToFile(`[Owner in WhatsApp] Suppressed AI reply for +${senderPhone} because owner is active in WhatsApp (${remainingSec}s left).`);
+        continue;
+      }
+
+      // 2. Chat-specific takeover: If you recently texted this specific person
       let pausedUntil = humanActiveUntil.get(remoteJid);
       if (pausedUntil && Date.now() < pausedUntil && !isSelfChat) {
         const remainingSec = Math.ceil((pausedUntil - Date.now()) / 1000);
-        console.log(`👤 [Human Active in Chat] You are actively chatting with +${senderPhone}. AI stopped (${remainingSec}s remaining).`);
+        console.log(`👤 [Human Active in Chat] You texted +${senderPhone}. AI stopped (${remainingSec}s remaining).`);
         logToFile(`[Human Active in Chat] Skipping AI reply for +${senderPhone} (${remainingSec}s remaining).`);
         continue;
       } else if (pausedUntil && Date.now() >= pausedUntil) {
@@ -430,10 +475,11 @@ async function startWhatsAppSocket() {
         }, { timeout: 35000 });
 
         // CRITICAL RACE CONDITION CHECK:
-        // Did the user send a message from their phone while Gemini was generating the reply?
-        if (humanActiveUntil.get(remoteJid) > Date.now()) {
-          console.log(`👤 [Cancelled AI reply] You sent a message while AI was generating. Suppressing AI reply to +${senderPhone}.`);
-          logToFile(`[Cancelled AI reply] Human texted during AI generation. Suppressed reply to +${senderPhone}.`);
+        // Did the owner open WhatsApp, read messages, or send a message while Gemini was generating the reply?
+        const timeSinceActiveNow = Date.now() - lastOwnerActiveTime;
+        if (isOwnerOnline || timeSinceActiveNow < (OWNER_INACTIVITY_DELAY_SECONDS * 1000) || humanActiveUntil.get(remoteJid) > Date.now()) {
+          console.log(`👤 [Cancelled AI reply] You opened/used WhatsApp while AI was generating. Suppressing AI reply to +${senderPhone}.`);
+          logToFile(`[Cancelled AI reply] Owner active during AI generation. Suppressed reply to +${senderPhone}.`);
           await sock.sendPresenceUpdate('paused', remoteJid);
           continue;
         }
