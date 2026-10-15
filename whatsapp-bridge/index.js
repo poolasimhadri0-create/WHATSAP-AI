@@ -127,14 +127,19 @@ async function startWhatsAppSocket() {
         creds: state.creds,
         keys: makeCacheableSignalKeyStore(state.keys, logger),
       },
-      browser: Browsers.ubuntu('Chrome'),
+      browser: Browsers.macOS('Desktop'),
       syncFullHistory: false,
       markOnlineOnConnect: false,
       generateHighQualityLinkPreview: false,
+      connectTimeoutMs: 60000,
+      defaultQueryTimeoutMs: 60000,
+      keepAliveIntervalMs: 25000,
+      retryRequestDelayMs: 2000,
       getMessage: async (key) => {
         return { conversation: '' };
       },
     });
+
 
   sock.ev.on('creds.update', saveCreds);
 
@@ -421,14 +426,22 @@ app.get('/qr', (req, res) => {
       <p style="color:#8696a0;">Please wait a moment...</p>
     </body></html>`);
   }
-  res.send(`<!DOCTYPE html><html><head><title>Scan WhatsApp QR Code</title><meta name="viewport" content="width=device-width,initial-scale=1"></head><body style="font-family:system-ui,-apple-system,sans-serif;text-align:center;padding:40px 20px;background:#0b141a;color:#e9edef;">
-    <div style="max-width:420px;margin:0 auto;background:#111b21;padding:30px;border-radius:16px;box-shadow:0 8px 24px rgba(0,0,0,0.5);">
-      <h2 style="color:#25D366;margin:0 0 8px;">Scan with WhatsApp</h2>
-      <p style="color:#8696a0;margin:0 0 20px;font-size:14px;">WhatsApp &gt; Settings &gt; Linked Devices &gt; Link a Device</p>
-      <div style="background:#ffffff;display:inline-block;padding:16px;border-radius:12px;">
-        <img src="${currentQRDataURL}" width="300" height="300" style="display:block;" />
+  res.send(`<!DOCTYPE html><html><head><title>Scan WhatsApp QR Code</title><meta name="viewport" content="width=device-width,initial-scale=1"></head><body style="font-family:system-ui,-apple-system,sans-serif;text-align:center;padding:30px 15px;background:#0b141a;color:#e9edef;">
+    <div style="max-width:440px;margin:0 auto;background:#111b21;padding:26px 20px;border-radius:16px;box-shadow:0 8px 24px rgba(0,0,0,0.5);">
+      <h2 style="color:#25D366;margin:0 0 8px;font-size:22px;">Scan with WhatsApp</h2>
+      <p style="color:#8696a0;margin:0 0 16px;font-size:13px;">WhatsApp &gt; Settings &gt; Linked Devices &gt; Link a Device</p>
+      <div style="background:#ffffff;display:inline-block;padding:14px;border-radius:12px;">
+        <img src="${currentQRDataURL}" width="280" height="280" style="display:block;" />
       </div>
-      <p style="color:#8696a0;font-size:13px;margin-top:20px;">This page automatically updates when connected.</p>
+      <p style="color:#8696a0;font-size:12px;margin:16px 0 0;">Auto-refreshes when linked.</p>
+      <div style="margin-top:18px;padding-top:16px;border-top:1px solid #202c33;">
+        <p style="font-size:12px;color:#f15c6d;margin:0 0 10px;">⚠️ Seeing <b>"Could not connect, try again later"</b> on your phone?</p>
+        <p style="font-size:11px;color:#8696a0;margin:0 0 12px;text-align:left;line-height:1.5;">
+          1. On your phone: Go to <b>Linked Devices</b> and <b>Log Out</b> any old active session.<br>
+          2. Click the button below to generate a fresh QR code:
+        </p>
+        <a href="/reset" style="background:#ea4335;color:#ffffff;text-decoration:none;padding:9px 18px;border-radius:8px;font-size:13px;display:inline-block;font-weight:600;">🔄 Reset Session & Get New QR</a>
+      </div>
     </div>
     <script>
       setInterval(async () => {
@@ -441,6 +454,35 @@ app.get('/qr', (req, res) => {
     </script>
   </body></html>`);
 });
+
+app.get('/reset', async (req, res) => {
+  try {
+    if (sock) {
+      try {
+        sock.ev.removeAllListeners();
+        sock.end();
+      } catch (_) {}
+      sock = null;
+    }
+    const authDir = path.join(__dirname, 'auth_info_baileys');
+    if (fs.existsSync(authDir)) {
+      fs.rmSync(authDir, { recursive: true, force: true });
+    }
+    isConnected = false;
+    currentQR = null;
+    currentQRDataURL = null;
+    userPhone = null;
+    console.log('[WhatsApp Web] Session reset requested. Re-initializing socket...');
+    setTimeout(startWhatsAppSocket, 1000);
+    return res.send(`<!DOCTYPE html><html><head><meta http-equiv="refresh" content="2;url=/qr"><title>Resetting...</title></head><body style="background:#0b141a;color:#fff;font-family:system-ui,sans-serif;text-align:center;padding:60px 20px;">
+      <h2 style="color:#25D366;">🔄 Session Cleared!</h2>
+      <p style="color:#8696a0;">Generating fresh QR code now... Redirecting in 2 seconds.</p>
+    </body></html>`);
+  } catch (err) {
+    return res.status(500).send(`Error resetting session: ${err.message}`);
+  }
+});
+
 
 app.get('/blacklist', (req, res) => {
   res.json(getBlacklistConfig());
