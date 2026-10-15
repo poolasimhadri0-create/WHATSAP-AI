@@ -91,7 +91,8 @@ function cleanDigits(val) {
 
 function isOwnerJid(jid) {
   if (!jid || typeof jid !== 'string') return false;
-  if (jid.endsWith('@g.us')) return false;
+  if (jid.endsWith('@g.us') || jid.includes('@g.us')) return false;
+  if (jid.includes('@newsletter') || jid.includes('@broadcast')) return false;
 
   const rawId = jid.split('@')[0].split(':')[0];
   const cleanId = cleanDigits(rawId);
@@ -213,13 +214,19 @@ function getAiOperationalStatus() {
   const timeoutMs = (bridgeSettings.ownerInactivitySeconds || 16) * 1000;
   const timeSinceActive = lastOwnerActiveTime > 0 ? (Date.now() - lastOwnerActiveTime) : Infinity;
 
-  if (isOwnerOnline) {
+  // Crucial: Auto-expire isOwnerOnline if owner has been inactive for 16 seconds!
+  if (timeSinceActive >= timeoutMs) {
+    isOwnerOnline = false;
+  }
+
+  if (isOwnerOnline && timeSinceActive < timeoutMs) {
+    const remainingSec = Math.ceil((timeoutMs - timeSinceActive) / 1000);
     return {
       status: 'owner_active',
       reason: 'owner_in_whatsapp',
-      description: `👤 Owner active in WhatsApp. Meera AI stopped immediately (No replies sent while online).`,
-      remainingMs: timeoutMs,
-      remainingSec: bridgeSettings.ownerInactivitySeconds || 16,
+      description: `👤 Owner active in WhatsApp. Meera AI stopped immediately (${remainingSec}s until auto-activation)`,
+      remainingMs: timeoutMs - timeSinceActive,
+      remainingSec,
     };
   }
 
@@ -441,12 +448,14 @@ async function startWhatsAppSocket() {
     sock.ws?.on('CB:receipt', (node) => {
       try {
         const attrs = node?.attrs || {};
+        const chatJid = attrs.from || attrs.recipient || attrs.to || '';
+        if (chatJid.includes('@newsletter') || chatJid.includes('@broadcast') || chatJid.includes('@g.us')) {
+          return; // Ignore newsletter / broadcast / group receipts
+        }
         const type = attrs.type;
         if (type === 'read-self' || type === 'played-self') {
-          const chatJid = attrs.from || attrs.recipient || attrs.to;
           handleOwnerActivityDetected(`Owner read chat on phone (${type})`, chatJid);
         } else if ((type === 'read' || type === 'played') && isOwnerJid(attrs.from)) {
-          const chatJid = attrs.recipient || attrs.to;
           handleOwnerActivityDetected(`Owner read chat on phone (${type})`, chatJid);
         }
       } catch (_) {}
@@ -478,15 +487,6 @@ async function startWhatsAppSocket() {
       } catch (_) {}
     });
 
-    // D. Raw Notification / App Sync Stanzas
-    sock.ws?.on('CB:notification', (node) => {
-      try {
-        const attrs = node?.attrs || {};
-        if (isOwnerJid(attrs.from) || attrs.type === 'sync' || attrs.type === 'account_sync') {
-          handleOwnerActivityDetected(`App sync notification (${attrs.type || 'active'})`);
-        }
-      } catch (_) {}
-    });
 
     // E. Baileys messages.update (Status 4 = READ, Status 5 = PLAYED)
     sock.ev.on('messages.update', (updates) => {
@@ -719,18 +719,23 @@ async function startWhatsAppSocket() {
           continue;
         }
 
-        // 2. OWNER ONLINE CHECK: Owner is currently active/online in WhatsApp!
-        // User rule: When owner is online in WhatsApp, AI Meera MUST NOT reply to user messages!
-        if (isOwnerOnline && !isSelf) {
-          console.log(`👤 [Owner Online in WhatsApp] Owner is online on phone. Meera AI will NOT reply to message from +${senderPhone}.`);
-          logToFile(`[Owner Online] Suppressed AI reply for +${senderPhone}. Owner is online in WhatsApp.`);
+        // 2. OWNER ONLINE & 16-SECOND OFFLINE DELAY CHECK:
+        const timeSinceOwnerActive = lastOwnerActiveTime > 0 ? (Date.now() - lastOwnerActiveTime) : Infinity;
+        const requiredOfflineMs = (bridgeSettings.ownerInactivitySeconds || 16) * 1000;
+
+        // If 16 seconds have passed since last active action, owner is definitely offline!
+        if (timeSinceOwnerActive >= requiredOfflineMs) {
+          isOwnerOnline = false;
+        }
+
+        // When owner is actively in WhatsApp (within 16s active window): AI Meera MUST NOT reply!
+        if (isOwnerOnline && timeSinceOwnerActive < requiredOfflineMs && !isSelf) {
+          console.log(`👤 [Owner Online in WhatsApp] Owner is active on phone (${Math.floor(timeSinceOwnerActive / 1000)}s ago). Meera AI will NOT reply to message from +${senderPhone}.`);
+          logToFile(`[Owner Online] Suppressed AI reply for +${senderPhone}. Owner is active in WhatsApp.`);
           continue; // Strictly NO reply!
         }
 
         // 3. 16-SECOND OFFLINE DELAY CHECK:
-        // User rule: When owner goes offline for 16 seconds, after that Meera comes online to reply!
-        const timeSinceOwnerActive = lastOwnerActiveTime > 0 ? (Date.now() - lastOwnerActiveTime) : Infinity;
-        const requiredOfflineMs = (bridgeSettings.ownerInactivitySeconds || 16) * 1000;
         let waitTimeMs = (bridgeSettings.inboundWaitSeconds || 2) * 1000;
 
         if (lastOwnerActiveTime > 0 && timeSinceOwnerActive < requiredOfflineMs) {
