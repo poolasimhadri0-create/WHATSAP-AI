@@ -121,17 +121,19 @@ async def fetch_from_bridge(method: str, path: str, json_data: dict = None, time
     for base in ["http://127.0.0.1:3001", "http://localhost:3001"]:
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
-                if method == "GET":
+                if method.upper() in ["GET", "HEAD"]:
                     return await client.get(f"{base}{path}")
-                elif method == "POST":
+                elif method.upper() == "POST":
                     return await client.post(f"{base}{path}", json=json_data)
         except Exception:
             continue
     raise ConnectionError("Bridge connection refused on port 3001")
 
-@app.get("/qr", response_class=HTMLResponse)
-async def qr_proxy():
+@app.api_route("/qr", methods=["GET", "HEAD"])
+async def qr_proxy(request: Request):
     """Proxies the WhatsApp QR linking page directly from the local bridge."""
+    if request.method == "HEAD":
+        return Response(status_code=200)
     try:
         resp = await fetch_from_bridge("GET", "/qr", timeout=10.0)
         return HTMLResponse(content=resp.text, status_code=resp.status_code)
@@ -155,9 +157,11 @@ async def pair_code_proxy(request: Request):
     except Exception as e:
         return {"error": str(e)}
 
-@app.get("/status")
-async def bridge_status_proxy():
-    """Proxies connection status."""
+@app.api_route("/status", methods=["GET", "HEAD"])
+async def bridge_status_proxy(request: Request):
+    """Proxies connection status (supports GET and HEAD for uptime monitors)."""
+    if request.method == "HEAD":
+        return Response(status_code=200)
     try:
         resp = await fetch_from_bridge("GET", "/status", timeout=5.0)
         return Response(content=resp.content, status_code=resp.status_code, media_type=resp.headers.get("content-type"))
@@ -182,9 +186,11 @@ async def bridge_logout_proxy():
     except Exception as e:
         return {"error": str(e)}
 
-@app.get("/logs")
-async def bridge_logs_proxy():
+@app.api_route("/logs", methods=["GET", "HEAD"])
+async def bridge_logs_proxy(request: Request):
     """Proxies live WhatsApp bridge logs."""
+    if request.method == "HEAD":
+        return Response(status_code=200)
     try:
         resp = await fetch_from_bridge("GET", "/logs", timeout=10.0)
         return Response(content=resp.content, status_code=resp.status_code, media_type="text/plain; charset=utf-8")
