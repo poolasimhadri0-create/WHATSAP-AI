@@ -184,14 +184,15 @@ async def handle_bridge_incoming_message(
             "message": "Human takeover active. AI reply suppressed."
         }
 
-    # 6. Fetch conversation context and invoke Gemini AI
+    # 6. Fetch recent conversation context (last 6 messages) and invoke Gemini AI
     stmt = (
         select(Message)
         .where(Message.conversation_id == conversation.id)
-        .order_by(Message.created_at.asc())
+        .order_by(Message.created_at.desc())
+        .limit(6)
     )
     res = await db.execute(stmt)
-    history = res.scalars().all()
+    history = list(reversed(res.scalars().all()))
 
     ai_reply_text, handoff_triggered = await generate_llm_reply(
         messages_history=history,

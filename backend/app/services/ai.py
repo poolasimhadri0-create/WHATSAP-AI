@@ -13,6 +13,19 @@ from app.models.message import Message, MessageSender
 logger = logging.getLogger(__name__)
 
 
+_gemini_client: Optional[httpx.AsyncClient] = None
+
+def get_gemini_client() -> httpx.AsyncClient:
+    global _gemini_client
+    if _gemini_client is None or _gemini_client.is_closed:
+        _gemini_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(connect=4.0, read=8.0, write=4.0, pool=5.0),
+            limits=httpx.Limits(max_keepalive_connections=10, max_connections=20, keepalive_expiry=60.0),
+            headers={"Content-Type": "application/json"}
+        )
+    return _gemini_client
+
+
 async def call_gemini_api(
     api_key: str,
     model: str,
@@ -20,16 +33,16 @@ async def call_gemini_api(
     chat_context: List[Dict[str, str]],
 ) -> str:
     """
-    Calls Google Gemini REST API directly with ultra-low latency (< 1s).
-    Automatically tries current flash models if one is busy.
+    Calls Google Gemini REST API directly with ultra-low latency (< 1.5s).
+    Reuses persistent HTTP connections and limits output tokens for snappy WhatsApp replies.
     """
-    # Clean model name candidates
-    candidate_models = [
-        model.replace("models/", "") if model else "gemini-3.1-flash-lite",
-        "gemini-3.1-flash-lite",
-        "gemini-3.5-flash",
-        "gemini-flash-latest",
-    ]
+    # Clean and prioritize fastest verified models
+    requested = model.replace("models/", "") if model else "gemini-3.1-flash-lite"
+    candidate_models = [requested]
+    if requested != "gemini-3.1-flash-lite":
+        candidate_models.append("gemini-3.1-flash-lite")
+    if "gemini-3.5-flash-lite" not in candidate_models:
+        candidate_models.append("gemini-3.5-flash-lite")
 
     # Format multi-turn contents for Gemini
     contents = []
@@ -47,30 +60,30 @@ async def call_gemini_api(
         "contents": contents,
         "generationConfig": {
             "temperature": 0.7,
-            "maxOutputTokens": 300,
+            "maxOutputTokens": 90,
         }
     }
 
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        for m in candidate_models:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent?key={api_key}"
-            try:
-                response = await client.post(url, json=payload)
-                if response.status_code == 200:
-                    data = response.json()
-                    candidates = data.get("candidates", [])
-                    if candidates and "content" in candidates[0]:
-                        parts = candidates[0]["content"].get("parts", [])
-                        text_parts = [p["text"] for p in parts if "text" in p and p["text"]]
-                        if text_parts:
-                            return "\n".join(text_parts).strip()
-                else:
-                    logger.warning(f"Gemini {m} returned {response.status_code}")
-            except Exception as e:
-                logger.warning(f"Gemini attempt with {m} failed: {e}")
-                continue
+    client = get_gemini_client()
+    for m in candidate_models:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent?key={api_key}"
+        try:
+            response = await client.post(url, json=payload)
+            if response.status_code == 200:
+                data = response.json()
+                candidates = data.get("candidates", [])
+                if candidates and "content" in candidates[0]:
+                    parts = candidates[0]["content"].get("parts", [])
+                    text_parts = [p["text"] for p in parts if "text" in p and p["text"]]
+                    if text_parts:
+                        return "\n".join(text_parts).strip()
+            else:
+                logger.warning(f"Gemini {m} returned {response.status_code}")
+        except Exception as e:
+            logger.warning(f"Gemini attempt with {m} failed: {e}")
+            continue
 
-        return ""
+    return ""
 
 DEFAULT_SYSTEM_PROMPT = """You are "Meera", a witty, sweet, funny, and charming personal AI assistant chatting on WhatsApp on behalf of Simhadri.
 
@@ -242,10 +255,9 @@ async def generate_llm_reply(
     # 2. Build Context
     system_content = f"{bot_config['system_prompt']}\n\nBUSINESS KNOWLEDGE BASE:\n{bot_config['knowledge_base']}"
 
-    # Prepare chat history (last 12 messages)
+    # Prepare chat history (last 6 messages for snappy response speed)
     chat_context = []
-    # Take the last 12 messages before the current one
-    recent_messages = messages_history[-12:] if len(messages_history) > 12 else messages_history
+    recent_messages = messages_history[-6:] if len(messages_history) > 6 else messages_history
     for m in recent_messages:
         role = "user" if m.sender == MessageSender.user else "assistant"
         chat_context.append({"role": role, "content": m.content})

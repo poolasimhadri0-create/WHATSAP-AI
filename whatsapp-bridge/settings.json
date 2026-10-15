@@ -1,7 +1,7 @@
 {
   "isAiPaused": false,
   "pauseUntil": 0,
-  "inboundWaitSeconds": 2,
+  "inboundWaitSeconds": 0,
   "ownerInactivitySeconds": 16,
   "chatTakeoverMinutes": 10
 }

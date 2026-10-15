@@ -736,7 +736,7 @@ async function startWhatsAppSocket() {
         }
 
         // 3. 16-SECOND OFFLINE DELAY CHECK:
-        let waitTimeMs = (bridgeSettings.inboundWaitSeconds || 2) * 1000;
+        let waitTimeMs = 0;
 
         if (lastOwnerActiveTime > 0 && timeSinceOwnerActive < requiredOfflineMs) {
           // Owner went offline recently, but 16 seconds have not elapsed yet!
@@ -745,7 +745,12 @@ async function startWhatsAppSocket() {
           console.log(`⏳ [16s Offline Delay] Owner was active ${Math.floor(timeSinceOwnerActive / 1000)}s ago. Meera will activate in ${waitSec}s if owner remains offline.`);
           logToFile(`[16s Offline Delay] Queued reply for +${senderPhone} for ${waitSec}s.`);
         } else {
-          console.log(`🟢 [Meera Active] Owner has been offline for 16s+. Queueing reply for +${senderPhone} (${Math.ceil(waitTimeMs / 1000)}s buffer)...`);
+          waitTimeMs = (bridgeSettings.inboundWaitSeconds || 0) * 1000;
+          if (waitTimeMs > 0) {
+            console.log(`🟢 [Meera Active] Owner offline 16s+. Queueing reply for +${senderPhone} (${Math.ceil(waitTimeMs / 1000)}s buffer)...`);
+          } else {
+            console.log(`⚡ [Meera Instant] Owner offline 16s+. Replying instantly to +${senderPhone}...`);
+          }
         }
 
         const waitSecDisplay = Math.ceil(waitTimeMs / 1000);
@@ -797,15 +802,14 @@ async function startWhatsAppSocket() {
           }
 
           // 🟢 OWNER IS TRULY OFFLINE (16s+): Meera Auto-Activates to help the contact!
-          console.log(`🟢 [Meera Auto-Activated] Owner offline for 16s+. Generating AI reply for +${capturedSenderPhone} (${capturedSenderName})...`);
+          console.log(`⚡ [Meera Auto-Activated] Generating instant AI reply for +${capturedSenderPhone} (${capturedSenderName})...`);
           logToFile(`[Meera Auto-Activated] Generating reply for +${capturedSenderPhone}`);
 
           try {
-            try {
-              await sock.sendPresenceUpdate('composing', capturedRemoteJid);
-            } catch (_) {}
+            // Non-blocking composing presence so it doesn't add latency to the AI call
+            sock.sendPresenceUpdate('composing', capturedRemoteJid).catch(() => {});
 
-            // Forward message to FastAPI backend
+            // Forward message to FastAPI backend immediately
             const res = await axios.post(FASTAPI_URL, {
               sender_phone: capturedSenderPhone,
               sender_name: capturedSenderName,

@@ -188,14 +188,15 @@ async def process_incoming_whatsapp_message(payload_dict: dict):
                             })
                             continue
 
-                        # If AI is active, fetch recent messages as context
+                        # If AI is active, fetch recent messages as context (last 6 messages)
                         stmt = (
                             select(Message)
                             .where(Message.conversation_id == conversation.id)
-                            .order_by(Message.created_at.asc())
+                            .order_by(Message.created_at.desc())
+                            .limit(6)
                         )
                         res = await db.execute(stmt)
-                        history = res.scalars().all()
+                        history = list(reversed(res.scalars().all()))
 
                         # Call AI Reply Engine
                         ai_reply_text, handoff_triggered = await generate_llm_reply(
