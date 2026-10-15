@@ -18,7 +18,7 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const PORT = process.env.PORT || 3001;
+const PORT = process.env.BRIDGE_PORT || 3001;
 const FASTAPI_URL = process.env.FASTAPI_URL || 'http://127.0.0.1:8000/api/v1/bridge/incoming';
 
 const app = express();

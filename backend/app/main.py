@@ -1,8 +1,10 @@
 import logging
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, Response
+from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select
+import httpx
 
 from app.core.config import settings
 from app.core.security import get_password_hash
@@ -99,14 +101,75 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+BRIDGE_INTERNAL_URL = "http://127.0.0.1:3001"
+
 @app.api_route("/", methods=["GET", "HEAD"])
 async def root():
     return {
         "status": "online",
         "service": "WhatsApp AI Engine (Gemini)",
         "message": "AI Engine is active and ready to reply to WhatsApp chats!",
-        "whatsapp_bridge": "http://127.0.0.1:3001/status"
+        "whatsapp_link_qr": "/qr",
+        "whatsapp_bridge_status": "/status"
     }
+
+@app.get("/qr", response_class=HTMLResponse)
+async def qr_proxy():
+    """Proxies the WhatsApp QR linking page directly from the local bridge."""
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(f"{BRIDGE_INTERNAL_URL}/qr")
+            return HTMLResponse(content=resp.text, status_code=resp.status_code)
+    except Exception as e:
+        return HTMLResponse(
+            content=f"""<!DOCTYPE html><html><head><meta http-equiv="refresh" content="3"><title>Starting WhatsApp Bridge...</title></head>
+            <body style="background:#0b141a;color:#fff;font-family:system-ui,-apple-system,sans-serif;text-align:center;padding:50px;">
+            <h2 style="color:#25D366;">WhatsApp Bridge is starting up...</h2>
+            <p style="color:#8696a0;">Please wait a moment while the bridge initializes. Auto-refreshing in 3 seconds...</p>
+            </body></html>""",
+            status_code=200
+        )
+
+@app.post("/pair-code")
+async def pair_code_proxy(request: Request):
+    """Proxies the phone number pairing code generator to the bridge."""
+    try:
+        body = await request.json()
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(f"{BRIDGE_INTERNAL_URL}/pair-code", json=body)
+            return Response(content=resp.content, status_code=resp.status_code, media_type=resp.headers.get("content-type"))
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.get("/status")
+async def bridge_status_proxy():
+    """Proxies connection status."""
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(f"{BRIDGE_INTERNAL_URL}/status")
+            return Response(content=resp.content, status_code=resp.status_code, media_type=resp.headers.get("content-type"))
+    except Exception as e:
+        return {"connected": False, "status": "starting", "error": str(e)}
+
+@app.get("/reset")
+async def bridge_reset_proxy():
+    """Proxies session reset."""
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(f"{BRIDGE_INTERNAL_URL}/reset")
+            return HTMLResponse(content=resp.text, status_code=resp.status_code)
+    except Exception as e:
+        return HTMLResponse(content=f"Error resetting: {e}", status_code=500)
+
+@app.post("/logout")
+async def bridge_logout_proxy():
+    """Proxies logout."""
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(f"{BRIDGE_INTERNAL_URL}/logout")
+            return Response(content=resp.content, status_code=resp.status_code, media_type=resp.headers.get("content-type"))
+    except Exception as e:
+        return {"error": str(e)}
 
 # 1. Direct Webhook Mounts (Meta WhatsApp standard endpoint: /webhook/whatsapp)
 app.include_router(webhook_router, prefix="/webhook", tags=["Meta WhatsApp Webhook"])

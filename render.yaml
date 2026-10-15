@@ -17,7 +17,5 @@ services:
         value: "false"
       - key: FALLBACK_TO_SQLITE
         value: "true"
-      - key: PORT
-        value: 3001
       - key: APP_URL
         value: https://whatsap-ai.onrender.com
