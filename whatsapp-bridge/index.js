@@ -222,42 +222,60 @@ async function startWhatsAppSocket() {
       }
 
 
-      // Check if this is user messaging themselves ("Message yourself") or from external sender
-      const cleanPhone = userPhone ? userPhone.replace('+', '').trim() : '';
-      const isSelfChat = cleanPhone && remoteJid.includes(cleanPhone);
-
       // If fromMe is true: YOU sent a message on your phone!
       if (msg.key.fromMe) {
-        if (isSelfChat) {
-          // Self-chat commands: !off / !on / !status
-          const selfText = (msg.message?.conversation || msg.message?.extendedTextMessage?.text || '').trim().toLowerCase();
-          if (selfText === '!off' || selfText === '!pause') {
-            globalPauseAllUntil = Date.now() + (60 * 60 * 1000); // 1 hour global pause
-            await sock.sendMessage(remoteJid, { text: '⏸️ AI auto-reply is now PAUSED globally for all chats.' });
-            continue;
-          }
-          if (selfText === '!on' || selfText === '!resume') {
-            globalPauseAllUntil = 0;
-            humanActiveUntil.clear();
-            await sock.sendMessage(remoteJid, { text: '▶️ AI auto-reply is now RESUMED globally!' });
-            continue;
-          }
-          if (selfText === '!status') {
-            const isPaused = globalPauseAllUntil > Date.now();
-            await sock.sendMessage(remoteJid, { text: isPaused ? '⏸️ AI is currently PAUSED.' : '🟢 AI is currently ACTIVE.' });
-            continue;
-          }
-        } else {
-          // You sent a manual message to a contact from your phone!
-          // Take over this chat: pause AI for this contact for 60 seconds
+        let content = msg.message;
+        if (content?.ephemeralMessage) content = content.ephemeralMessage.message;
+        if (content?.viewOnceMessage) content = content.viewOnceMessage.message;
+        if (content?.viewOnceMessageV2) content = content.viewOnceMessageV2.message;
+
+        const selfText = (
+          content?.conversation || 
+          content?.extendedTextMessage?.text || 
+          ''
+        ).trim().toLowerCase();
+
+        // 1. Owner WhatsApp Commands (!status / !off / !on)
+        if (selfText === '!status') {
+          const isPaused = globalPauseAllUntil > Date.now();
+          console.log(`[Owner Command] !status requested. Replying to ${remoteJid}`);
+          logToFile(`[Owner Command] !status received. Replying...`);
+          const replyText = isPaused 
+            ? '⏸️ AI is currently PAUSED.' 
+            : '🟢 AI (Meera) is currently ACTIVE and running 24/7 on Render! Group chats are BLOCKED.';
+          const sent = await sock.sendMessage(remoteJid, { text: replyText });
+          if (sent?.key?.id) sentMessageIds.add(sent.key.id);
+          continue;
+        }
+        if (selfText === '!off' || selfText === '!pause') {
+          globalPauseAllUntil = Date.now() + (60 * 60 * 1000); // 1 hour pause
+          const sent = await sock.sendMessage(remoteJid, { text: '⏸️ AI auto-reply is now PAUSED globally for all chats.' });
+          if (sent?.key?.id) sentMessageIds.add(sent.key.id);
+          continue;
+        }
+        if (selfText === '!on' || selfText === '!resume') {
+          globalPauseAllUntil = 0;
+          humanActiveUntil.clear();
+          const sent = await sock.sendMessage(remoteJid, { text: '▶️ AI auto-reply is now RESUMED globally!' });
+          if (sent?.key?.id) sentMessageIds.add(sent.key.id);
+          continue;
+        }
+
+        // 2. Check if this is self-chat ("Message yourself")
+        const myLid = sock.user?.lid ? sock.user.lid.split(':')[0] : '';
+        const isSelfChat = (cleanPhone && remoteJid.includes(cleanPhone)) || (myLid && remoteJid.includes(myLid));
+
+        if (!isSelfChat) {
+          // You sent a manual message to a contact: pause AI in this chat for 60s
           const pauseUntil = Date.now() + (CONVERSATION_PAUSE_SECONDS * 1000);
           humanActiveUntil.set(remoteJid, pauseUntil);
           const cleanRecipient = remoteJid.replace('@s.whatsapp.net', '').replace('@g.us', '').replace('@lid', '');
           console.log(`👤 [Human Active] You sent a message to +${cleanRecipient}. AI paused in this chat for ${CONVERSATION_PAUSE_SECONDS}s.`);
           logToFile(`[Human Active] Manual message to +${cleanRecipient}. Paused AI for ${CONVERSATION_PAUSE_SECONDS}s.`);
-          continue;
         }
+        continue;
       }
+
 
       // Unwrap nested messages (disappearing, view-once, quoted)
       let content = msg.message;
