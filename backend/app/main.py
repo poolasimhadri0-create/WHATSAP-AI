@@ -113,6 +113,10 @@ async def root():
         "whatsapp_bridge_status": "/status"
     }
 
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon():
+    return Response(status_code=204)
+
 async def fetch_from_bridge(method: str, path: str, json_data: dict = None, timeout: float = 10.0):
     for base in ["http://127.0.0.1:3001", "http://localhost:3001"]:
         try:
