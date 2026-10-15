@@ -178,9 +178,16 @@ async function startWhatsAppSocket() {
       if (shouldReconnect) {
         setTimeout(startWhatsAppSocket, 3000);
       } else {
-        console.log('[WhatsApp Web] Session logged out. Ready for new QR scan.');
+        console.log('[WhatsApp Web] Session logged out or link rejected. Clearing auth cache for fresh start...');
+        const authDir = path.join(__dirname, 'auth_info_baileys');
+        try {
+          if (fs.existsSync(authDir)) {
+            fs.rmSync(authDir, { recursive: true, force: true });
+          }
+        } catch (_) {}
         setTimeout(startWhatsAppSocket, 1000);
       }
+
     } else if (connection === 'open') {
       isConnected = true;
       currentQR = null;
