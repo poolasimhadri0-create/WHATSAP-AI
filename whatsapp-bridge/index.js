@@ -179,25 +179,31 @@ async function startWhatsAppSocket() {
 
     if (connection === 'close') {
       const statusCode = (lastDisconnect?.error)?.output?.statusCode;
-      const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+      const isLoggedOut = statusCode === DisconnectReason.loggedOut || statusCode === 401;
       isConnected = false;
       currentQR = null;
       currentQRDataURL = null;
-      console.log(`[WhatsApp Web] Connection closed due to: ${lastDisconnect?.error}, reconnecting: ${shouldReconnect}`);
-      logToFile(`[Connection] Closed: ${lastDisconnect?.error}, reconnecting: ${shouldReconnect}`);
-      if (shouldReconnect) {
-        setTimeout(startWhatsAppSocket, 3000);
-      } else {
-        console.log('[WhatsApp Web] Session logged out or link rejected. Clearing auth cache for fresh start...');
+
+      const errMsg = lastDisconnect?.error?.message || String(lastDisconnect?.error || 'Unknown disconnect');
+      console.log(`[WhatsApp Web] Connection closed due to: ${errMsg} (statusCode=${statusCode})`);
+      logToFile(`[Connection] Closed: ${errMsg}, statusCode=${statusCode}`);
+
+      if (isLoggedOut) {
+        console.log('[WhatsApp Web] Session logged out from phone. Clearing auth cache for new link...');
+        logToFile('[Connection] Explicit logout. Resetting auth directory...');
         const authDir = path.join(__dirname, 'auth_info_baileys');
         try {
           if (fs.existsSync(authDir)) {
             fs.rmSync(authDir, { recursive: true, force: true });
           }
         } catch (_) {}
-        setTimeout(startWhatsAppSocket, 1000);
+        setTimeout(startWhatsAppSocket, 1500);
+      } else {
+        // Stream conflict, server restart, temporary network drop - NEVER wipe auth, ALWAYS reconnect!
+        console.log('[WhatsApp Web] Temporary disconnect. Retrying connection in 4 seconds...');
+        logToFile('[Connection] Temporary disconnect. Auto-reconnecting in 4s...');
+        setTimeout(startWhatsAppSocket, 4000);
       }
-
     } else if (connection === 'open') {
       isConnected = true;
       currentQR = null;

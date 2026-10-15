@@ -17,5 +17,7 @@ services:
         value: "false"
       - key: FALLBACK_TO_SQLITE
         value: "true"
+      - key: DATABASE_URL
+        value: "sqlite+aiosqlite:///./whatsapp_ai.db"
       - key: APP_URL
         value: https://whatsap-ai.onrender.com
