@@ -150,11 +150,6 @@ async function startWhatsAppSocket() {
   isStartingSocket = true;
 
   try {
-    if (isSessionCorruptedOrUnregistered()) {
-      console.log('[WhatsApp Web] Stale/unregistered session detected. Clearing credentials for clean pairing...');
-      logToFile('[Auth] Auto-cleared stale credentials with registered=false');
-      clearAuthDirectory();
-    }
     if (sock) {
       try {
         sock.ev.removeAllListeners();
@@ -174,10 +169,10 @@ async function startWhatsAppSocket() {
         creds: state.creds,
         keys: makeCacheableSignalKeyStore(state.keys, logger),
       },
-      browser: Browsers.ubuntu('Chrome'),
+      browser: Browsers.macOS('Desktop'),
 
       syncFullHistory: false,
-      markOnlineOnConnect: false,
+      markOnlineOnConnect: true,
       generateHighQualityLinkPreview: false,
       connectTimeoutMs: 60000,
       defaultQueryTimeoutMs: 60000,
@@ -217,6 +212,7 @@ async function startWhatsAppSocket() {
     if (connection === 'close') {
       const statusCode = (lastDisconnect?.error)?.output?.statusCode;
       const isLoggedOut = statusCode === DisconnectReason.loggedOut || statusCode === 401;
+      const isRestartRequired = statusCode === 515 || statusCode === DisconnectReason.restartRequired;
       isConnected = false;
       currentQR = null;
       currentQRDataURL = null;
@@ -230,11 +226,15 @@ async function startWhatsAppSocket() {
         logToFile('[Connection] Explicit logout. Resetting auth directory...');
         clearAuthDirectory();
         setTimeout(startWhatsAppSocket, 1500);
+      } else if (isRestartRequired) {
+        console.log('[WhatsApp Web] Handshake accepted! Restarting socket immediately to finalize pairing...');
+        logToFile('[Connection] Pairing successful (515 restart). Finalizing link in 800ms...');
+        setTimeout(startWhatsAppSocket, 800);
       } else {
         // Stream conflict, server restart, temporary network drop - NEVER wipe auth, ALWAYS reconnect!
-        console.log('[WhatsApp Web] Temporary disconnect. Retrying connection in 4 seconds...');
-        logToFile('[Connection] Temporary disconnect. Auto-reconnecting in 4s...');
-        setTimeout(startWhatsAppSocket, 4000);
+        console.log('[WhatsApp Web] Temporary disconnect. Retrying connection in 3 seconds...');
+        logToFile('[Connection] Temporary disconnect. Auto-reconnecting in 3s...');
+        setTimeout(startWhatsAppSocket, 3000);
       }
     } else if (connection === 'open') {
       isConnected = true;
