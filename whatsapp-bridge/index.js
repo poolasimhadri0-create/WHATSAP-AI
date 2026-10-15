@@ -53,7 +53,7 @@ let isOwnerOnline = false;
 // 3. When owner goes offline -> 16-second countdown begins!
 //    After 16 seconds of owner inactivity, Meera comes online to reply.
 // 4. In WhatsApp groups -> Meera NEVER responds or replies if a link is present!
-// 5. When owner texts a contact -> Meera stops in that chat for 10 mins.
+// 5. When owner texts a contact -> Meera stops in that chat for 5 mins.
 // -------------------------------------------------------------------
 const SETTINGS_FILE = path.join(__dirname, 'settings.json');
 
@@ -61,9 +61,9 @@ function getSettings() {
   const defaults = {
     isAiPaused: false,
     pauseUntil: 0,
-    inboundWaitSeconds: 2,        // Brief typing simulation buffer when owner is already offline 16s+
+    inboundWaitSeconds: 0,        // Instant response buffer
     ownerInactivitySeconds: 16,   // Exact 16s offline delay before Meera activates
-    chatTakeoverMinutes: 10,      // When owner texts someone, Meera stops in that chat for 10 mins
+    chatTakeoverMinutes: 5,       // When owner texts someone, Meera stops in that chat for 5 mins
   };
   try {
     if (fs.existsSync(SETTINGS_FILE)) {
@@ -159,7 +159,7 @@ function handleOwnerActivityDetected(source, targetJid = null) {
 
   // If a specific conversation was interacted with, activate human takeover
   if (targetJid && !isSelfChat(targetJid)) {
-    const takeoverMs = (bridgeSettings.chatTakeoverMinutes || 10) * 60 * 1000;
+    const takeoverMs = (bridgeSettings.chatTakeoverMinutes || 5) * 60 * 1000;
     humanActiveUntil.set(targetJid, Date.now() + takeoverMs);
   }
 }
@@ -433,7 +433,7 @@ async function startWhatsAppSocket() {
         console.log(`📱 Logged in as: +${userPhone}`);
         console.log(`🤖 Meera AI Timing Plan Active:`);
         console.log(`   - When you are online/active in WhatsApp: Meera stops immediately!`);
-        console.log(`   - When you message someone: Meera stops in that chat for 15 mins!`);
+        console.log(`   - When you message someone: Meera stops in that chat for 5 mins!`);
         console.log(`   - When you close WhatsApp: Meera auto-activates!`);
         console.log('======================================================\n');
         logToFile(`[Connection] Open. Logged in as +${userPhone}`);
@@ -661,12 +661,12 @@ async function startWhatsAppSocket() {
           }
 
           // 🛡️ CHAT TAKEOVER: You sent a message to a contact!
-          // Protect this conversation from Meera for 10 minutes!
+          // Protect this conversation from Meera for 5 minutes!
           if (!isSelf) {
-            const takeoverMs = (bridgeSettings.chatTakeoverMinutes || 10) * 60 * 1000;
+            const takeoverMs = (bridgeSettings.chatTakeoverMinutes || 5) * 60 * 1000;
             humanActiveUntil.set(remoteJid, Date.now() + takeoverMs);
             const cleanRecipient = remoteJid.replace('@s.whatsapp.net', '').replace('@g.us', '').replace('@lid', '');
-            console.log(`👤 [Owner in WhatsApp] You sent a message to +${cleanRecipient}. Meera AI stopped in this chat for ${bridgeSettings.chatTakeoverMinutes || 10}m!`);
+            console.log(`👤 [Owner in WhatsApp] You sent a message to +${cleanRecipient}. Meera AI stopped in this chat for ${bridgeSettings.chatTakeoverMinutes || 5}m!`);
             logToFile(`[Owner Active] Sent message to +${cleanRecipient}. AI stopped in this chat.`);
           }
           continue;
@@ -1035,7 +1035,7 @@ app.get('/qr', (req, res) => {
       </div>
       <div class="info-row">
         <span class="info-label">When you message a contact:</span>
-        <span class="info-val" style="color:#ff5c6d;">Meera stops in that chat for 10 mins</span>
+        <span class="info-val" style="color:#ff5c6d;">Meera stops in that chat for 5 mins</span>
       </div>
       <div class="info-row">
         <span class="info-label">Links in WhatsApp Groups:</span>

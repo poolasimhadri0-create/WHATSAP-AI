@@ -3,5 +3,5 @@
   "pauseUntil": 0,
   "inboundWaitSeconds": 0,
   "ownerInactivitySeconds": 16,
-  "chatTakeoverMinutes": 10
+  "chatTakeoverMinutes": 5
 }

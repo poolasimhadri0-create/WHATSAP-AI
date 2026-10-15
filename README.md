@@ -129,12 +129,12 @@ You can customize the timing rules at any time in [`whatsapp-bridge/settings.jso
 {
   "isAiPaused": false,
   "pauseUntil": 0,
-  "inboundWaitSeconds": 2,
+  "inboundWaitSeconds": 0,
   "ownerInactivitySeconds": 16,
-  "chatTakeoverMinutes": 10
+  "chatTakeoverMinutes": 5
 }
 ```
 
 - `ownerInactivitySeconds` (`16`): Exact seconds of inactivity before Meera AI activates after you leave WhatsApp.
-- `inboundWaitSeconds` (`2`): Typing indicator simulation buffer.
-- `chatTakeoverMinutes` (`10`): Minutes Meera yields when you manually text a contact.
+- `inboundWaitSeconds` (`0`): Inbound delay before generating reply (0 for instant responses).
+- `chatTakeoverMinutes` (`5`): Minutes Meera yields when you manually text a contact.
