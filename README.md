@@ -1,114 +1,140 @@
-# 🚀 WhatsApp AI Auto-Reply & Live Human Takeover System
+# 🚀 WhatsApp AI (Meera) Auto-Reply & Smart Coexistence System
 
-A full-stack, enterprise-grade automated WhatsApp assistant powered by **Google Gemini AI** (ultra-fast sub-second responses), **FastAPI**, **MySQL** (with automatic local SQLite fallback), and a **React (TypeScript + Vite)** admin dashboard with real-time **WebSockets** and **human handoff**.
+An intelligent, full-stack automated WhatsApp assistant powered by **Google Gemini AI**, **FastAPI**, and a **Node.js Baileys WhatsApp Web Bridge**.
 
----
-
-## 🌟 Key Features
-
-1. **⚡ Ultra-Fast Google Gemini Auto-Reply (< 1-2 Seconds)**:
-   - When a user sends a WhatsApp message, Google Gemini (`gemini-1.5-flash` or `gemini-2.0-flash`) generates human-like, accurate replies in milliseconds.
-   - Preserves multi-turn conversation context (last 10–15 messages).
-   - Injects business knowledge base (pricing, hours, FAQs, policies).
-   - Clean WhatsApp markdown formatting (`*bold*`, `_italic_`, `~strike~`).
-
-2. **🛡️ AI Guardrails & Automatic Human Handoff**:
-   - Detects trigger keywords (e.g., *"talk to human"*, *"agent"*, *"complaint"*, *"speak with someone"*).
-   - Automatically pauses AI replies for that contact and alerts the admin dashboard in real-time.
-
-3. **👤 Live Agent Takeover Dashboard**:
-   - Live inbox showing conversations, unread badges, and status (`🤖 AI Active` vs `👤 Human Takeover`).
-   - One-click toggle switch to take over chat or return control to the AI.
-   - Manual agent composer to send messages directly to the customer's WhatsApp via Meta Cloud API.
-
-4. **⚙️ Dynamic AI Persona & Rules Editor**:
-   - Live settings panel to modify System Prompts, Business Name, Hours, Greeting Message, and Trigger Keywords without redeploying the app.
-
-5. **📱 Built-In WhatsApp Customer Simulator**:
-   - Test incoming messages, AI replies, and handoffs right inside your browser without needing public webhooks or ngrok during development!
+Meera AI is engineered with real-time owner presence detection, allowing seamless coexistence between you (the owner) and the AI without conflicts or overlapping replies.
 
 ---
 
-## 🛠️ Tech Stack
+## 🌟 Core Behavior & Operational Rules
 
-- **Frontend**: React 18, Vite, TypeScript, Tailwind CSS, Lucide Icons, Axios, WebSockets.
-- **Backend**: Python 3.11+, FastAPI, SQLAlchemy 2.0 (async), Pydantic v2, `httpx`, WebSockets, JWT Auth.
-- **AI Engine**: Google Gemini API (`gemini-1.5-flash` / `gemini-2.0-flash`), OpenAI, or Claude.
-- **Messaging Channel**: Meta WhatsApp Cloud API (official Graph API v20.0).
-- **Database**: MySQL 8.0 (async via `aiomysql`) with automatic SQLite fallback for zero-setup local dev.
+### 1. 👤 Real-Time Owner Detection (Instant Stop & No Replies When Online)
+- **Instant AI Stop**: Whenever the owner opens WhatsApp on their phone (read receipts, typing stanzas, active presence, or sending a message), Meera AI **stops immediately**.
+- **No Replies While Online**: When the owner is active/online in WhatsApp and users send messages, **Meera AI will NOT reply**. You have full personal control over your chats.
+- **Race Condition Protection**: If the owner opens WhatsApp while Gemini is generating a response, the reply is **immediately aborted** before sending.
+
+### 2. ⏳ Exact 16-Second Offline Activation Delay
+- **16-Second Timer**: When the owner closes WhatsApp or locks their phone, a **16-second inactivity countdown** begins.
+- **Auto-Activation**: Once the owner has been offline/inactive for **16 seconds**, Meera AI automatically comes online and starts replying to user messages.
+- **Abort on Re-Open**: If the owner re-opens WhatsApp at any second during the 16-second countdown, the timer is cleared and no AI reply is sent.
+
+### 3. 🚫 Strict Group Link Protection (No Responses & No Replies)
+- **Zero Group Link Spam**: When any message containing a link (`http://`, `https://`, `www.`, invite links like `chat.whatsapp.com`, `wa.me`, `t.me`, domain names, or preview cards) arrives in a WhatsApp group:
+  - **Meera AI will NOT respond.**
+  - **Meera AI will NOT reply.**
+- **Group Safety**: Group chats are safeguarded against spam, phishing links, and bot loops.
+
+### 4. 🛡️ Personal Chat Takeover (10 Minutes)
+- Whenever the owner sends a manual message to any contact, Meera AI automatically yields and pauses in that specific conversation for **10 minutes**, giving you uninterrupted conversation time.
 
 ---
 
-## 🚀 Quick Start (Local Development)
+## 🛠️ System Architecture
 
-### 1. Configure Environment Variables
+```mermaid
+graph TD
+    A[WhatsApp Network] -->|Incoming Message / Presence / Receipts| B[WhatsApp Web Bridge :3001]
+    B -->|Check: Is Owner Online?| C{Owner Status}
+    C -->|Owner Online| D[🛑 AI Stops - Zero Reply]
+    C -->|In Group with Link| E[🚫 Ignored - Zero Reply]
+    C -->|Owner Offline < 16s| F[⏳ Wait 16s Delay - Cancel if Owner Active]
+    C -->|Owner Offline >= 16s| G[🟢 Meera AI Active]
+    G -->|POST /api/v1/bridge/incoming| H[FastAPI Backend :8000]
+    H -->|Invoke LLM| I[Google Gemini AI]
+    I -->|Generated Response| H
+    H -->|Return Reply JSON| B
+    B -->|Re-check Owner Activity| J{Owner Still Offline?}
+    J -->|Yes| K[Send Message to WhatsApp Contact]
+    J -->|No| L[🛑 Abort Reply Immediately]
+```
+
+---
+
+## 🚀 Quick Start Guide
+
+### Prerequisites
+- **Python 3.11+** installed
+- **Node.js 18+ or 20+** installed
+- Free **Google Gemini API Key** from [Google AI Studio](https://aistudio.google.com/)
+
+---
+
+### Step 1: Configure Environment Variables
 Inside `backend/.env`:
 ```env
-# Database (MySQL or leave default for automatic local SQLite fallback)
-DATABASE_URL="mysql+aiomysql://root:password@localhost:3306/whatsapp_ai"
+# Gemini AI Configuration
+LLM_PROVIDER=gemini
+GEMINI_API_KEY=your_gemini_api_key_here
+LLM_MODEL=gemini-1.5-flash
+
+# Database (Uses local SQLite by default)
 FALLBACK_TO_SQLITE=True
+SQLITE_URL=sqlite+aiosqlite:///data/whatsapp_ai.db
 
-# Google Gemini API Key (Get free at: https://aistudio.google.com/)
-LLM_PROVIDER="gemini"
-GEMINI_API_KEY="your_gemini_api_key_here"
-LLM_MODEL="gemini-1.5-flash"
-
-# Meta WhatsApp Cloud API (Get from Meta Developers Console)
-WHATSAPP_TOKEN="EAAB..."
-WHATSAPP_PHONE_NUMBER_ID="your_phone_number_id"
-WHATSAPP_WABA_ID="your_waba_id"
-WHATSAPP_VERIFY_TOKEN="my_secure_verify_token_123"
-META_APP_SECRET="your_meta_app_secret"
+# WhatsApp Bridge Webhook URL
+FASTAPI_URL=http://127.0.0.1:8000/api/v1/bridge/incoming
 ```
 
-### 2. Launch the Application
-Double-click `start_all.bat` on Windows, or start each service:
+---
 
-**Backend**:
-```bash
+### Step 2: Start the System
+
+#### Option A: One-Click Startup (Windows)
+Double-click:
+- [`run_bot.bat`](file:///c:/Users/poola/OneDrive/Desktop/WHATSAP%20AI/run_bot.bat) — Launches both FastAPI backend and WhatsApp bridge.
+
+#### Option B: Manual Startup
+**Terminal 1 (Backend)**:
+```powershell
 cd backend
+python -m venv venv
 .\venv\Scripts\activate
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+pip install -r requirements.txt
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-**Frontend**:
-```bash
-cd frontend
-npm run dev
+**Terminal 2 (WhatsApp Bridge)**:
+```powershell
+cd whatsapp-bridge
+npm install
+node index.js
 ```
-
-- **React Dashboard**: [http://localhost:5173](http://localhost:5173)
-- **FastAPI Backend & Swagger Docs**: [http://localhost:8000/docs](http://localhost:8000/docs)
-- **WebSocket Endpoint**: `ws://localhost:8000/ws/dashboard`
 
 ---
 
-## 🔐 Default Login Credentials
-
-- **Email**: `admin@example.com`
-- **Password**: `admin123`
-
----
-
-## 📲 Meta WhatsApp Cloud API Setup
-
-1. Go to [developers.facebook.com](https://developers.facebook.com/) and create an App.
-2. Select **WhatsApp** under products.
-3. Obtain your:
-   - `Temporary/Permanent Access Token` (`WHATSAPP_TOKEN`)
-   - `Phone number ID` (`WHATSAPP_PHONE_NUMBER_ID`)
-   - `WhatsApp Business Account ID` (`WHATSAPP_WABA_ID`)
-4. In WhatsApp **Configuration** > **Webhook**:
-   - Callback URL: `https://<your-domain>/webhook/whatsapp`
-   - Verify Token: `my_secure_verify_token_123` (matching `WHATSAPP_VERIFY_TOKEN`)
-5. Click **Verify and save**, then subscribe to the `messages` field.
+### Step 3: Link Your WhatsApp
+1. Open your browser and visit: **[http://localhost:3001/qr](http://localhost:3001/qr)**
+2. On your phone: Open **WhatsApp > Settings > Linked Devices > Link a Device**.
+3. Scan the QR code shown on the screen.
+4. Once connected, Meera AI will activate according to your configured 16-second rule!
 
 ---
 
-## 🐳 Docker Deployment
+## 📱 WhatsApp Self-Chat Remote Controls
 
-To launch MySQL 8.0, FastAPI backend, and Nginx frontend in containers:
-```bash
-docker-compose up --build
+Send any of these commands to your own WhatsApp number (Self-Chat / "Message Yourself"):
+
+| Command | Action |
+| :--- | :--- |
+| `!off` or `stop` | **Stops Meera AI manually** (AI will not reply to anyone). |
+| `!on` or `start` | **Activates Meera AI** (Resumes 16s offline auto-reply rule). |
+| `!status` | **Checks live status** (Shows whether you are detected online or offline). |
+
+---
+
+## ⚙️ Timing Configuration (`whatsapp-bridge/settings.json`)
+
+You can customize the timing rules at any time in [`whatsapp-bridge/settings.json`](file:///c:/Users/poola/OneDrive/Desktop/WHATSAP%20AI/whatsapp-bridge/settings.json):
+```json
+{
+  "isAiPaused": false,
+  "pauseUntil": 0,
+  "inboundWaitSeconds": 2,
+  "ownerInactivitySeconds": 16,
+  "chatTakeoverMinutes": 10
+}
 ```
-Access the dashboard on `http://localhost:5173`.
+
+- `ownerInactivitySeconds` (`16`): Exact seconds of inactivity before Meera AI activates after you leave WhatsApp.
+- `inboundWaitSeconds` (`2`): Typing indicator simulation buffer.
+- `chatTakeoverMinutes` (`10`): Minutes Meera yields when you manually text a contact.

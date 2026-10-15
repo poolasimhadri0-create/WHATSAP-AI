@@ -23,8 +23,14 @@ class BridgeIncomingPayload(BaseModel):
     message_id: Optional[str] = None
 
 
+import re
 import json
 from pathlib import Path
+
+URL_PATTERN = re.compile(
+    r"(https?://\S+|www\.\S+|[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}(?:/\S*)?|chat\.whatsapp\.com/\S+|wa\.me/\S+|t\.me/\S+)",
+    re.IGNORECASE
+)
 
 def is_phone_blacklisted(phone: str) -> bool:
     """Check if phone number is listed in blacklist.json."""
@@ -75,9 +81,15 @@ async def handle_bridge_incoming_message(
             "handoff": False,
             "message": f"Phone number {clean_phone} is blacklisted from AI replies."
         }
-
-    # Strict protection: Never reply to groups
-    if "g.us" in payload.sender_phone or "group" in payload.sender_phone.lower() or "-" in payload.sender_phone:
+    # Strict protection: Never reply to groups, and strictly block links in groups
+    is_group = "g.us" in payload.sender_phone or "group" in payload.sender_phone.lower() or "-" in payload.sender_phone
+    if is_group:
+        if URL_PATTERN.search(payload.message_text):
+            return {
+                "reply": None,
+                "handoff": False,
+                "message": "Group messages with links are blocked from AI auto-replies."
+            }
         return {
             "reply": None,
             "handoff": False,
@@ -228,3 +240,44 @@ async def handle_bridge_incoming_message(
         "reply": ai_reply_text,
         "handoff": handoff_triggered,
     }
+
+
+class ContactHandoffPayload(BaseModel):
+    phone: str
+    contact_name: Optional[str] = "WhatsApp User"
+    handoff: bool = True
+
+
+@router.post("/handoff-contact")
+async def handoff_contact(
+    payload: ContactHandoffPayload,
+    db: AsyncSession = Depends(get_db)
+):
+    """Marks a contact for human takeover when owner manually messages them."""
+    clean_phone = payload.phone.replace("+", "").replace(" ", "").replace("-", "").strip()
+    if not clean_phone:
+        raise HTTPException(status_code=400, detail="Invalid phone")
+
+    stmt = select(Contact).where(Contact.wa_phone_number == clean_phone)
+    res = await db.execute(stmt)
+    contact = res.scalar_one_or_none()
+    if not contact:
+        contact = Contact(
+            wa_phone_number=clean_phone,
+            name=payload.contact_name or "WhatsApp User",
+            handoff_to_human=payload.handoff
+        )
+        db.add(contact)
+    else:
+        contact.handoff_to_human = payload.handoff
+    await db.commit()
+    await db.refresh(contact)
+
+    await ws_manager.broadcast("handoff_updated", {
+        "contact_id": contact.id,
+        "phone": contact.wa_phone_number,
+        "handoff_to_human": contact.handoff_to_human,
+        "source": "owner_action"
+    })
+    return {"success": True, "phone": clean_phone, "handoff_to_human": contact.handoff_to_human}
+

@@ -41,13 +41,207 @@ let currentQRDataURL = null;
 let isConnected = false;
 let userPhone = null;
 const sentMessageIds = new Set();
-
-// Smart Auto-Pause & Chat Takeover Settings (Owner Active Guard)
 const humanActiveUntil = new Map();
-let globalPauseAllUntil = 0;
+const pendingReplyTimers = new Map();
 let lastOwnerActiveTime = 0;
 let isOwnerOnline = false;
-const OWNER_INACTIVITY_DELAY_SECONDS = 10; // Exactly 10s after closing WhatsApp, AI automatically activates!
+
+// -------------------------------------------------------------------
+// TIMING & AUTO-REPLY RULES:
+// 1. When owner is active/online in WhatsApp -> Meera stops immediately!
+// 2. When owner is online -> Meera does NOT reply to user messages!
+// 3. When owner goes offline -> 16-second countdown begins!
+//    After 16 seconds of owner inactivity, Meera comes online to reply.
+// 4. In WhatsApp groups -> Meera NEVER responds or replies if a link is present!
+// 5. When owner texts a contact -> Meera stops in that chat for 10 mins.
+// -------------------------------------------------------------------
+const SETTINGS_FILE = path.join(__dirname, 'settings.json');
+
+function getSettings() {
+  const defaults = {
+    isAiPaused: false,
+    pauseUntil: 0,
+    inboundWaitSeconds: 2,        // Brief typing simulation buffer when owner is already offline 16s+
+    ownerInactivitySeconds: 16,   // Exact 16s offline delay before Meera activates
+    chatTakeoverMinutes: 10,      // When owner texts someone, Meera stops in that chat for 10 mins
+  };
+  try {
+    if (fs.existsSync(SETTINGS_FILE)) {
+      const data = JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8'));
+      return { ...defaults, ...data };
+    }
+  } catch (_) {}
+  return defaults;
+}
+
+function saveSettings(newSettings) {
+  try {
+    fs.writeFileSync(SETTINGS_FILE, JSON.stringify(newSettings, null, 2), 'utf8');
+  } catch (err) {
+    console.error('Error saving settings.json:', err.message);
+  }
+}
+
+let bridgeSettings = getSettings();
+
+function cleanDigits(val) {
+  if (!val) return '';
+  return String(val).replace(/\D/g, '');
+}
+
+function isOwnerJid(jid) {
+  if (!jid || typeof jid !== 'string') return false;
+  if (jid.endsWith('@g.us')) return false;
+
+  const rawId = jid.split('@')[0].split(':')[0];
+  const cleanId = cleanDigits(rawId);
+  const cleanOwner = cleanDigits(userPhone);
+
+  if (cleanOwner && cleanId === cleanOwner) return true;
+
+  if (sock?.user?.id) {
+    const sockUserDigits = cleanDigits(sock.user.id.split('@')[0].split(':')[0]);
+    if (sockUserDigits && cleanId === sockUserDigits) return true;
+  }
+
+  if (sock?.user?.lid) {
+    const sockLidDigits = cleanDigits(sock.user.lid.split('@')[0].split(':')[0]);
+    if (sockLidDigits && cleanId === sockLidDigits) return true;
+  }
+
+  return false;
+}
+
+function isSelfChat(remoteJid) {
+  if (!remoteJid) return false;
+  const cleanOwnerPhone = cleanDigits(userPhone);
+  const myLid = sock?.user?.lid ? sock.user.lid.split(':')[0] : '';
+  return Boolean(
+    (cleanOwnerPhone && remoteJid.includes(cleanOwnerPhone)) ||
+    (myLid && remoteJid.includes(myLid))
+  );
+}
+
+// 🛡️ Strict URL / Link Detection Helper
+function containsLink(text, msgContent = null) {
+  if (msgContent) {
+    if (msgContent.extendedTextMessage?.matchedText || msgContent.extendedTextMessage?.canonicalUrl) {
+      return true;
+    }
+    if (msgContent.groupInviteMessage) {
+      return true;
+    }
+  }
+  if (!text || typeof text !== 'string') return false;
+
+  // Regex matches http://, https://, www., domain.ext/, chat.whatsapp.com, wa.me, t.me, etc.
+  const urlPattern = /(https?:\/\/[^\s]+)|(www\.[^\s]+)|([a-zA-Z0-9-]+\.[a-zA-Z]{2,}(\/[^\s]*)?)|(chat\.whatsapp\.com\/[^\s]+)|(wa\.me\/[^\s]+)|(t\.me\/[^\s]+)/i;
+  return urlPattern.test(text);
+}
+
+function handleOwnerActivityDetected(source, targetJid = null) {
+  lastOwnerActiveTime = Date.now();
+  isOwnerOnline = true;
+  console.log(`👤 [Owner Active in WhatsApp] ${source}! Meera AI stopped immediately.`);
+  logToFile(`[Owner Active] ${source}. Target: ${targetJid || 'global'}`);
+
+  // Cancel ALL pending AI reply timers immediately!
+  if (pendingReplyTimers.size > 0) {
+    for (const [jid, item] of pendingReplyTimers.entries()) {
+      clearTimeout(item.timeoutId);
+      const cleanPhone = cleanDigits(jid);
+      console.log(`🛑 [Cancelled AI Reply] Owner opened WhatsApp / became active (${source}). Cancelled pending reply for +${cleanPhone}.`);
+      logToFile(`[Cancelled AI Reply] Cancelled pending reply for +${cleanPhone} due to: ${source}`);
+    }
+    pendingReplyTimers.clear();
+  }
+
+  // If a specific conversation was interacted with, activate human takeover
+  if (targetJid && !isSelfChat(targetJid)) {
+    const takeoverMs = (bridgeSettings.chatTakeoverMinutes || 10) * 60 * 1000;
+    humanActiveUntil.set(targetJid, Date.now() + takeoverMs);
+  }
+}
+
+function handleOwnerOfflineDetected(source) {
+  if (isOwnerOnline) {
+    isOwnerOnline = false;
+    lastOwnerActiveTime = Date.now(); // 16-second countdown starts NOW!
+    console.log(`👤 [Owner Offline] ${source}. 16-second inactivity countdown started. Meera AI will activate after 16s.`);
+    logToFile(`[Owner Offline] ${source}. 16-second countdown started.`);
+  }
+}
+
+function getOwnerInactivityRemainingSeconds() {
+  if (lastOwnerActiveTime <= 0) return 0;
+  const elapsed = Date.now() - lastOwnerActiveTime;
+  const requiredMs = (bridgeSettings.ownerInactivitySeconds || 16) * 1000;
+  if (elapsed >= requiredMs) return 0;
+  return Math.ceil((requiredMs - elapsed) / 1000);
+}
+
+function getAiOperationalStatus() {
+  // 1. Manual Pause Override
+  if (bridgeSettings.isAiPaused) {
+    if (bridgeSettings.pauseUntil > 0) {
+      if (Date.now() < bridgeSettings.pauseUntil) {
+        const remainingMs = bridgeSettings.pauseUntil - Date.now();
+        return {
+          status: 'paused',
+          reason: 'manual_pause',
+          description: `AI manually paused (${Math.ceil(remainingMs / 60000)}m left)`,
+          remainingMs,
+          remainingSec: Math.ceil(remainingMs / 1000),
+        };
+      } else {
+        bridgeSettings.isAiPaused = false;
+        bridgeSettings.pauseUntil = 0;
+        saveSettings(bridgeSettings);
+      }
+    } else {
+      return {
+        status: 'stopped',
+        reason: 'indefinite_stop',
+        description: 'AI is stopped manually (Send !on or click Resume to start)',
+        remainingMs: Infinity,
+        remainingSec: Infinity,
+      };
+    }
+  }
+
+  // 2. Owner Online / Active Check:
+  const timeoutMs = (bridgeSettings.ownerInactivitySeconds || 16) * 1000;
+  const timeSinceActive = lastOwnerActiveTime > 0 ? (Date.now() - lastOwnerActiveTime) : Infinity;
+
+  if (isOwnerOnline) {
+    return {
+      status: 'owner_active',
+      reason: 'owner_in_whatsapp',
+      description: `👤 Owner active in WhatsApp. Meera AI stopped immediately (No replies sent while online).`,
+      remainingMs: timeoutMs,
+      remainingSec: bridgeSettings.ownerInactivitySeconds || 16,
+    };
+  }
+
+  if (lastOwnerActiveTime > 0 && timeSinceActive < timeoutMs) {
+    const remainingSec = Math.ceil((timeoutMs - timeSinceActive) / 1000);
+    return {
+      status: 'owner_active',
+      reason: 'owner_offline_cooldown',
+      description: `👤 Owner offline. Meera AI activating in ${remainingSec}s (${remainingSec}s of 16s offline delay remaining)`,
+      remainingMs: timeoutMs - timeSinceActive,
+      remainingSec,
+    };
+  }
+
+  return {
+    status: 'active',
+    reason: 'running',
+    description: '🟢 Meera AI is ACTIVE! (Online to help users because owner is offline for 16s+)',
+    remainingMs: 0,
+    remainingSec: 0,
+  };
+}
 
 function logToFile(msg) {
   try {
@@ -56,6 +250,7 @@ function logToFile(msg) {
     fs.appendFileSync(logPath, `[${timestamp}] ${msg}\n`);
   } catch (_) {}
 }
+
 function clearAuthDirectory() {
   const authDir = path.join(__dirname, 'auth_info_baileys');
   try {
@@ -88,7 +283,6 @@ function isSessionCorruptedOrUnregistered() {
   return false;
 }
 
-
 // ----------------------------------------------------
 // Blacklist / Ignored Numbers & Groups Configuration
 // ----------------------------------------------------
@@ -110,11 +304,6 @@ function getBlacklistConfig() {
   };
 }
 
-function cleanDigits(val) {
-  if (!val) return '';
-  return String(val).replace(/\D/g, '');
-}
-
 function isNumberIgnored(phone, ignoredNumbers = []) {
   if (!phone || !Array.isArray(ignoredNumbers)) return false;
   const cleanSender = cleanDigits(phone);
@@ -123,27 +312,25 @@ function isNumberIgnored(phone, ignoredNumbers = []) {
   return ignoredNumbers.some((num) => {
     const cleanBlocked = cleanDigits(num);
     if (!cleanBlocked) return false;
-    // Exact match or suffix match (e.g. without or with country code)
     return cleanSender === cleanBlocked || 
       (cleanSender.length >= 7 && cleanBlocked.length >= 7 && (cleanSender.endsWith(cleanBlocked) || cleanBlocked.endsWith(cleanSender)));
   });
 }
 
-function isGroupIgnored(remoteJid, ignoredGroups = []) {
-  if (!remoteJid || !Array.isArray(ignoredGroups)) return false;
-  const cleanJid = String(remoteJid).toLowerCase().trim();
-
-  return ignoredGroups.some((item) => {
-    const cleanItem = String(item).toLowerCase().trim();
-    if (!cleanItem) return false;
-    return cleanJid.includes(cleanItem);
-  });
-}
-
-
 const logger = pino({ level: 'silent' });
-
 let isStartingSocket = false;
+
+async function subscribeOwnerPresence() {
+  if (!sock || !isConnected || !userPhone) return;
+  try {
+    const cleanPhone = cleanDigits(userPhone);
+    const ownerJid = `${cleanPhone}@s.whatsapp.net`;
+    await sock.presenceSubscribe(ownerJid);
+    if (sock.user?.lid) {
+      await sock.presenceSubscribe(sock.user.lid);
+    }
+  } catch (_) {}
+}
 
 async function startWhatsAppSocket() {
   if (isStartingSocket) return;
@@ -170,340 +357,505 @@ async function startWhatsAppSocket() {
         keys: makeCacheableSignalKeyStore(state.keys, logger),
       },
       browser: Browsers.macOS('Desktop'),
-
       syncFullHistory: false,
-      markOnlineOnConnect: true,
+      markOnlineOnConnect: false,
       generateHighQualityLinkPreview: false,
       connectTimeoutMs: 60000,
       defaultQueryTimeoutMs: 60000,
       keepAliveIntervalMs: 25000,
       retryRequestDelayMs: 2000,
-      getMessage: async (key) => {
+      getMessage: async () => {
         return { conversation: '' };
       },
     });
 
+    sock.ev.on('creds.update', saveCreds);
 
-  sock.ev.on('creds.update', saveCreds);
+    sock.ev.on('connection.update', async (update) => {
+      const { connection, lastDisconnect, qr } = update;
 
-  sock.ev.on('connection.update', async (update) => {
-    const { connection, lastDisconnect, qr } = update;
+      if (qr) {
+        currentQR = qr;
+        isConnected = false;
+        userPhone = null;
 
-    if (qr) {
-      currentQR = qr;
-      isConnected = false;
-      userPhone = null;
+        try {
+          currentQRDataURL = await QRCode.toDataURL(qr);
+        } catch (err) {
+          console.error('Error creating QR data URL:', err);
+        }
 
+        console.log('\n======================================================');
+        console.log('   SCAN THIS QR CODE IN WHATSAPP TO LINK YOUR AI AGENT');
+        console.log('   (WhatsApp > Settings > Linked Devices > Link a Device)');
+        console.log('======================================================\n');
+        qrcodeTerminal.generate(qr, { small: true });
+        console.log('\n🔗 Open http://localhost:3001/qr in your browser to view QR or Link with Phone Number\n');
+      }
+
+      if (connection === 'close') {
+        const statusCode = (lastDisconnect?.error)?.output?.statusCode;
+        const isLoggedOut = statusCode === DisconnectReason.loggedOut || statusCode === 401;
+        const isRestartRequired = statusCode === 515 || statusCode === DisconnectReason.restartRequired;
+        isConnected = false;
+        currentQR = null;
+        currentQRDataURL = null;
+
+        const errMsg = lastDisconnect?.error?.message || String(lastDisconnect?.error || 'Unknown disconnect');
+        console.log(`[WhatsApp Web] Connection closed due to: ${errMsg} (statusCode=${statusCode})`);
+        logToFile(`[Connection] Closed: ${errMsg}, statusCode=${statusCode}`);
+
+        if (isLoggedOut) {
+          console.log('[WhatsApp Web] Session logged out. Clearing auth cache...');
+          clearAuthDirectory();
+          setTimeout(startWhatsAppSocket, 1500);
+        } else if (isRestartRequired) {
+          console.log('[WhatsApp Web] Handshake accepted! Restarting socket to finalize pairing...');
+          setTimeout(startWhatsAppSocket, 800);
+        } else {
+          console.log('[WhatsApp Web] Temporary disconnect. Retrying connection in 3 seconds...');
+          setTimeout(startWhatsAppSocket, 3000);
+        }
+      } else if (connection === 'open') {
+        isConnected = true;
+        currentQR = null;
+        currentQRDataURL = null;
+        userPhone = sock.user?.id?.split(':')[0] || sock.user?.id || 'Connected';
+        console.log('\n======================================================');
+        console.log(`✅ WHATSAPP LINKED SUCCESSFULLY!`);
+        console.log(`📱 Logged in as: +${userPhone}`);
+        console.log(`🤖 Meera AI Timing Plan Active:`);
+        console.log(`   - When you are online/active in WhatsApp: Meera stops immediately!`);
+        console.log(`   - When you message someone: Meera stops in that chat for 15 mins!`);
+        console.log(`   - When you close WhatsApp: Meera auto-activates!`);
+        console.log('======================================================\n');
+        logToFile(`[Connection] Open. Logged in as +${userPhone}`);
+        subscribeOwnerPresence();
+      }
+    });
+
+    // ----------------------------------------------------
+    // 1. Detect Real-Time Owner Activity & Presence Updates
+    // ----------------------------------------------------
+    // A. Raw WebSocket Receipt Stanzas (Owner reading on phone)
+    sock.ws?.on('CB:receipt', (node) => {
       try {
-        currentQRDataURL = await QRCode.toDataURL(qr);
-      } catch (err) {
-        console.error('Error creating QR data URL:', err);
-      }
+        const attrs = node?.attrs || {};
+        const type = attrs.type;
+        if (type === 'read-self' || type === 'played-self') {
+          const chatJid = attrs.from || attrs.recipient || attrs.to;
+          handleOwnerActivityDetected(`Owner read chat on phone (${type})`, chatJid);
+        } else if ((type === 'read' || type === 'played') && isOwnerJid(attrs.from)) {
+          const chatJid = attrs.recipient || attrs.to;
+          handleOwnerActivityDetected(`Owner read chat on phone (${type})`, chatJid);
+        }
+      } catch (_) {}
+    });
 
-      console.log('\n======================================================');
-      console.log('   SCAN THIS QR CODE IN WHATSAPP TO LINK YOUR AI AGENT');
-      console.log('   (WhatsApp > Settings > Linked Devices > Link a Device)');
-      console.log('======================================================\n');
-      qrcodeTerminal.generate(qr, { small: true });
-      console.log('\n🔗 If ASCII QR is distorted in cloud logs, click or open this link to view QR code:');
-      console.log(`https://api.qrserver.com/v1/create-qr-code/?size=350x350&data=${encodeURIComponent(qr)}\n`);
-    }
+    // B. Raw Chatstate Stanzas (Owner typing on phone)
+    sock.ws?.on('CB:chatstate', (node) => {
+      try {
+        const attrs = node?.attrs || {};
+        if (isOwnerJid(attrs.from) || isOwnerJid(attrs.participant)) {
+          handleOwnerActivityDetected('Owner typing on phone', attrs.from);
+        }
+      } catch (_) {}
+    });
 
-    if (connection === 'close') {
-      const statusCode = (lastDisconnect?.error)?.output?.statusCode;
-      const isLoggedOut = statusCode === DisconnectReason.loggedOut || statusCode === 401;
-      const isRestartRequired = statusCode === 515 || statusCode === DisconnectReason.restartRequired;
-      isConnected = false;
-      currentQR = null;
-      currentQRDataURL = null;
+    // C. Raw Presence Stanzas (Owner online or offline)
+    sock.ws?.on('CB:presence', (node) => {
+      try {
+        const attrs = node?.attrs || {};
+        const from = attrs.from || '';
+        if (isOwnerJid(from)) {
+          const type = attrs.type;
+          if (type === 'unavailable') {
+            handleOwnerOfflineDetected('Presence unavailable stanza');
+          } else {
+            handleOwnerActivityDetected(`Presence online stanza (${type || 'available'})`, from);
+          }
+        }
+      } catch (_) {}
+    });
 
-      const errMsg = lastDisconnect?.error?.message || String(lastDisconnect?.error || 'Unknown disconnect');
-      console.log(`[WhatsApp Web] Connection closed due to: ${errMsg} (statusCode=${statusCode})`);
-      logToFile(`[Connection] Closed: ${errMsg}, statusCode=${statusCode}`);
+    // D. Raw Notification / App Sync Stanzas
+    sock.ws?.on('CB:notification', (node) => {
+      try {
+        const attrs = node?.attrs || {};
+        if (isOwnerJid(attrs.from) || attrs.type === 'sync' || attrs.type === 'account_sync') {
+          handleOwnerActivityDetected(`App sync notification (${attrs.type || 'active'})`);
+        }
+      } catch (_) {}
+    });
 
-      if (isLoggedOut) {
-        console.log('[WhatsApp Web] Session logged out from phone. Clearing auth cache for new link...');
-        logToFile('[Connection] Explicit logout. Resetting auth directory...');
-        clearAuthDirectory();
-        setTimeout(startWhatsAppSocket, 1500);
-      } else if (isRestartRequired) {
-        console.log('[WhatsApp Web] Handshake accepted! Restarting socket immediately to finalize pairing...');
-        logToFile('[Connection] Pairing successful (515 restart). Finalizing link in 800ms...');
-        setTimeout(startWhatsAppSocket, 800);
-      } else {
-        // Stream conflict, server restart, temporary network drop - NEVER wipe auth, ALWAYS reconnect!
-        console.log('[WhatsApp Web] Temporary disconnect. Retrying connection in 3 seconds...');
-        logToFile('[Connection] Temporary disconnect. Auto-reconnecting in 3s...');
-        setTimeout(startWhatsAppSocket, 3000);
-      }
-    } else if (connection === 'open') {
-      isConnected = true;
-      currentQR = null;
-      currentQRDataURL = null;
-      userPhone = sock.user?.id?.split(':')[0] || sock.user?.id || 'Connected';
-      console.log('\n======================================================');
-      console.log(`✅ WHATSAPP LINKED SUCCESSFULLY!`);
-      console.log(`📱 Logged in as: +${userPhone}`);
-      console.log(`🤖 Gemini AI is now actively responding to your WhatsApp chats!`);
-      console.log('======================================================\n');
-      logToFile(`[Connection] Open. Logged in as +${userPhone}`);
-    }
-  });
+    // E. Baileys messages.update (Status 4 = READ, Status 5 = PLAYED)
+    sock.ev.on('messages.update', (updates) => {
+      try {
+        for (const u of updates) {
+          const status = u.update?.status;
+          if ((status === 4 || status === 5) && !u.key?.fromMe) {
+            handleOwnerActivityDetected('Incoming message marked READ on phone', u.key?.remoteJid);
+          }
+        }
+      } catch (_) {}
+    });
 
-  // 1. Detect when owner opens or closes WhatsApp on phone
-  sock.ev.on('presence.update', (update) => {
-    const cleanOwner = cleanDigits(userPhone);
-    const myLid = sock.user?.lid ? sock.user.lid.split(':')[0] : '';
-    const { id, presences } = update || {};
+    // F. Baileys message-receipt.update
+    sock.ev.on('message-receipt.update', (events) => {
+      try {
+        for (const e of events) {
+          if (e.receipt?.readTimestamp && !e.key?.fromMe) {
+            handleOwnerActivityDetected('Read receipt detected on phone', e.key?.remoteJid);
+          }
+        }
+      } catch (_) {}
+    });
 
-    for (const [jid, p] of Object.entries(presences || {})) {
-      const cleanJid = cleanDigits(jid);
-      const isOwner = (cleanOwner && cleanJid.includes(cleanOwner)) || 
-                      (myLid && jid.includes(myLid)) || 
-                      (cleanOwner && id && cleanDigits(id).includes(cleanOwner));
-      if (isOwner) {
-        if (p.lastKnownPresence === 'available' || p.lastKnownPresence === 'composing') {
-          isOwnerOnline = true;
-          lastOwnerActiveTime = Date.now();
-          console.log('👤 [Owner in WhatsApp] You opened WhatsApp (Online). AI auto-reply paused.');
-          logToFile('[Presence] Owner online. AI auto-reply paused.');
-        } else if (p.lastKnownPresence === 'unavailable') {
-          isOwnerOnline = false;
-          lastOwnerActiveTime = Date.now();
-          console.log(`👤 [Owner in WhatsApp] You closed WhatsApp. AI will auto-activate in ${OWNER_INACTIVITY_DELAY_SECONDS}s.`);
-          logToFile(`[Presence] Owner closed WhatsApp. Auto-activating in ${OWNER_INACTIVITY_DELAY_SECONDS}s.`);
+    // G. Baileys chats.update (Unread count becomes 0 when owner opens a chat)
+    sock.ev.on('chats.update', (chats) => {
+      try {
+        for (const chat of chats) {
+          if (typeof chat.unreadCount === 'number' && chat.unreadCount === 0) {
+            handleOwnerActivityDetected('Owner opened chat in WhatsApp', chat.id);
+          }
+        }
+      } catch (_) {}
+    });
+
+    // H. Standard Presence Updates
+    sock.ev.on('presence.update', (update) => {
+      const { id, presences } = update || {};
+      let matchedPresence = null;
+
+      if (isOwnerJid(id)) {
+        for (const p of Object.values(presences || {})) {
+          matchedPresence = p;
+          break;
+        }
+      } else if (presences) {
+        for (const [pjid, p] of Object.entries(presences)) {
+          if (isOwnerJid(pjid)) {
+            matchedPresence = p;
+            break;
+          }
         }
       }
-    }
-  });
 
-  // 2. Detect when owner reads messages on phone (blue ticks / receipts)
-  sock.ev.on('message-receipt.update', () => {
-    lastOwnerActiveTime = Date.now();
-  });
-
-  // Listen for incoming messages
-  sock.ev.on('messages.upsert', async (m) => {
-    logToFile(`[messages.upsert] type=${m.type}, count=${m.messages?.length || 0}`);
-
-    for (const msg of m.messages) {
-      if (!msg.message) continue;
-      const remoteJid = msg.key.remoteJid;
-      if (!remoteJid || remoteJid.includes('@broadcast') || remoteJid.includes('@newsletter')) continue;
-
-      // 🚫 STRICT RULE: NEVER reply or chat in WhatsApp groups!
-      const isGroupMessage = remoteJid.endsWith('@g.us') || 
-                             remoteJid.includes('@g.us') || 
-                             Boolean(msg.key.participant) || 
-                             Boolean(msg.participant);
-      if (isGroupMessage) {
-        continue; // Completely ignore all group messages
+      if (matchedPresence) {
+        const pStatus = matchedPresence.lastKnownPresence;
+        if (pStatus === 'available' || pStatus === 'composing' || pStatus === 'recording') {
+          handleOwnerActivityDetected(`Presence ONLINE (${pStatus})`, id);
+        } else if (pStatus === 'unavailable' || pStatus === 'paused') {
+          handleOwnerOfflineDetected(`Presence OFFLINE (${pStatus})`);
+        }
       }
+    });
 
-      // Don't reply to our own AI outbound messages
-      if (msg.key.id && sentMessageIds.has(msg.key.id)) {
-        continue;
-      }
+    // ----------------------------------------------------
+    // 2. Process Incoming & Outgoing Messages
+    // ----------------------------------------------------
+    sock.ev.on('messages.upsert', async (m) => {
+      logToFile(`[messages.upsert] type=${m.type}, count=${m.messages?.length || 0}`);
 
+      for (const msg of m.messages) {
+        if (!msg.message) continue;
+        const remoteJid = msg.key.remoteJid;
+        if (!remoteJid || remoteJid.includes('@broadcast') || remoteJid.includes('@newsletter')) continue;
 
-      // Check if this is self-chat ("Message yourself") or incoming from someone else
-      const cleanOwnerPhone = cleanDigits(userPhone);
-      const myLid = sock.user?.lid ? sock.user.lid.split(':')[0] : '';
-      const isSelfChat = Boolean(
-        (cleanOwnerPhone && remoteJid.includes(cleanOwnerPhone)) ||
-        (myLid && remoteJid.includes(myLid))
-      );
-
-      // If fromMe is true: YOU sent a message on your phone!
-      if (msg.key.fromMe) {
         let content = msg.message;
         if (content?.ephemeralMessage) content = content.ephemeralMessage.message;
         if (content?.viewOnceMessage) content = content.viewOnceMessage.message;
         if (content?.viewOnceMessageV2) content = content.viewOnceMessageV2.message;
+        if (content?.documentWithCaptionMessage) content = content.documentWithCaptionMessage.message;
 
-        const selfText = (
-          content?.conversation || 
-          content?.extendedTextMessage?.text || 
-          ''
-        ).trim().toLowerCase();
+        const text =
+          content?.conversation ||
+          content?.extendedTextMessage?.text ||
+          content?.imageMessage?.caption ||
+          content?.videoMessage?.caption ||
+          '';
 
-        // 1. Owner WhatsApp Commands (!status / !off / !on)
-        if (selfText === '!status') {
-          const isPaused = globalPauseAllUntil > Date.now();
-          console.log(`[Owner Command] !status requested. Replying to ${remoteJid}`);
-          logToFile(`[Owner Command] !status received. Replying...`);
-          const replyText = isPaused 
-            ? '⏸️ AI is currently PAUSED.' 
-            : '🟢 AI (Meera) is currently ACTIVE and running 24/7 on Render! Group chats are BLOCKED.';
-          const sent = await sock.sendMessage(remoteJid, { text: replyText });
-          if (sent?.key?.id) sentMessageIds.add(sent.key.id);
-          continue;
-        }
-        if (selfText === '!off' || selfText === '!pause') {
-          globalPauseAllUntil = Date.now() + (60 * 60 * 1000); // 1 hour pause
-          const sent = await sock.sendMessage(remoteJid, { text: '⏸️ AI auto-reply is now PAUSED globally for all chats.' });
-          if (sent?.key?.id) sentMessageIds.add(sent.key.id);
-          continue;
-        }
-        if (selfText === '!on' || selfText === '!resume') {
-          globalPauseAllUntil = 0;
-          humanActiveUntil.clear();
-          const sent = await sock.sendMessage(remoteJid, { text: '▶️ AI auto-reply is now RESUMED globally!' });
-          if (sent?.key?.id) sentMessageIds.add(sent.key.id);
-          continue;
-        }
+        // 🚫 GROUP CHAT & GROUP LINK PROTECTION:
+        // User rule: When links arrive in groups, Meera AI must NOT respond and must NOT reply!
+        const isGroupMessage = remoteJid.endsWith('@g.us') || 
+                               remoteJid.includes('@g.us') || 
+                               Boolean(msg.key.participant) || 
+                               Boolean(msg.participant);
 
-        // 2. You sent a message from your phone: owner is active in WhatsApp!
-        lastOwnerActiveTime = Date.now();
-        if (!isSelfChat) {
-          const pauseUntil = Date.now() + (OWNER_INACTIVITY_DELAY_SECONDS * 1000);
-          humanActiveUntil.set(remoteJid, pauseUntil);
-          const cleanRecipient = remoteJid.replace('@s.whatsapp.net', '').replace('@g.us', '').replace('@lid', '');
-          console.log(`👤 [Owner in WhatsApp] You sent a message to +${cleanRecipient}. AI stopped for ${OWNER_INACTIVITY_DELAY_SECONDS}s.`);
-          logToFile(`[Owner Active] Manual message to +${cleanRecipient}. Paused AI for ${OWNER_INACTIVITY_DELAY_SECONDS}s.`);
-        }
-        continue;
-      }
+        if (isGroupMessage) {
+          if (containsLink(text, content)) {
+            console.log(`🚫 [Group Link Blocked] Link detected in group chat (${remoteJid}). Meera AI will NOT respond or reply.`);
+            logToFile(`[Group Link Blocked] Suppressed reply for link in group (${remoteJid}): "${text}"`);
+            continue; // Do NOT respond, do NOT reply!
+          }
 
-
-      // Unwrap nested messages (disappearing, view-once, quoted)
-      let content = msg.message;
-      if (content?.ephemeralMessage) content = content.ephemeralMessage.message;
-      if (content?.viewOnceMessage) content = content.viewOnceMessage.message;
-      if (content?.viewOnceMessageV2) content = content.viewOnceMessageV2.message;
-      if (content?.documentWithCaptionMessage) content = content.documentWithCaptionMessage.message;
-
-      // Extract text content
-      const text =
-        content?.conversation ||
-        content?.extendedTextMessage?.text ||
-        content?.imageMessage?.caption ||
-        content?.videoMessage?.caption ||
-        '';
-
-      if (!text.trim()) continue;
-
-      const senderPhone = remoteJid.replace('@s.whatsapp.net', '').replace('@g.us', '').replace('@lid', '');
-      const senderName = msg.pushName || (isSelfChat ? 'You' : 'WhatsApp User');
-      const isGroup = remoteJid.endsWith('@g.us') || remoteJid.includes('@g.us') || Boolean(msg.key.participant) || Boolean(msg.participant);
-      if (isGroup) {
-        continue;
-      }
-
-      // Check if phone number is blacklisted
-      const blacklist = getBlacklistConfig();
-      const participant = msg.key.participant ? msg.key.participant.replace('@s.whatsapp.net', '').replace('@lid', '') : null;
-      if (isNumberIgnored(senderPhone, blacklist.ignored_numbers) || (participant && isNumberIgnored(participant, blacklist.ignored_numbers))) {
-        const blockedNumber = isNumberIgnored(senderPhone, blacklist.ignored_numbers) ? senderPhone : participant;
-        console.log(`🚫 [Blacklist Active] Contact +${blockedNumber} is in blacklist. Skipping AI auto-reply.`);
-        logToFile(`[Blacklist Active] Skipping AI auto-reply for +${blockedNumber}`);
-        continue;
-      }
-
-
-      // Manual command triggers in any chat
-      const lowerCmd = text.toLowerCase().trim();
-      if (lowerCmd === '!pause' || lowerCmd === '!ai off' || lowerCmd === '!off') {
-        const pauseUntil = Date.now() + (30 * 60 * 1000); // 30 min manual pause
-        humanActiveUntil.set(remoteJid, pauseUntil);
-        console.log(`⏸️ AI manually paused for 30 minutes in chat ${remoteJid}`);
-        await sock.sendMessage(remoteJid, { text: '⏸️ AI auto-reply paused in this chat.' });
-        continue;
-      }
-      if (lowerCmd === '!resume' || lowerCmd === '!ai on' || lowerCmd === '!on') {
-        humanActiveUntil.delete(remoteJid);
-        console.log(`▶️ AI manually resumed in chat ${remoteJid}`);
-        await sock.sendMessage(remoteJid, { text: '▶️ AI auto-reply resumed in this chat!' });
-        continue;
-      }
-
-      // Global pause check
-      if (globalPauseAllUntil > Date.now()) {
-        console.log(`⏸️ [Global Pause Active] Skipping incoming message from +${senderPhone}.`);
-        continue;
-      }
-
-      // 1. OWNER ACTIVE GUARD: When you are active in WhatsApp, AI stops.
-      // After you close WhatsApp for 10 seconds, AI automatically activates!
-      const timeSinceOwnerActive = Date.now() - lastOwnerActiveTime;
-      const isOwnerCurrentlyActive = isOwnerOnline || (timeSinceOwnerActive < (OWNER_INACTIVITY_DELAY_SECONDS * 1000));
-
-      if (isOwnerCurrentlyActive && !isSelfChat) {
-        const remainingSec = Math.max(1, Math.ceil(((OWNER_INACTIVITY_DELAY_SECONDS * 1000) - timeSinceOwnerActive) / 1000));
-        console.log(`👤 [Owner in WhatsApp] You are active in WhatsApp. AI stopped (${remainingSec}s until auto-activation).`);
-        logToFile(`[Owner in WhatsApp] Suppressed AI reply for +${senderPhone} because owner is active in WhatsApp (${remainingSec}s left).`);
-        continue;
-      }
-
-      // 2. Chat-specific takeover: If you recently texted this specific person
-      let pausedUntil = humanActiveUntil.get(remoteJid);
-      if (pausedUntil && Date.now() < pausedUntil && !isSelfChat) {
-        const remainingSec = Math.ceil((pausedUntil - Date.now()) / 1000);
-        console.log(`👤 [Human Active in Chat] You texted +${senderPhone}. AI stopped (${remainingSec}s remaining).`);
-        logToFile(`[Human Active in Chat] Skipping AI reply for +${senderPhone} (${remainingSec}s remaining).`);
-        continue;
-      } else if (pausedUntil && Date.now() >= pausedUntil) {
-        humanActiveUntil.delete(remoteJid);
-      }
-
-      const logHeader = isGroup ? `[Group Inbound]` : (isSelfChat ? `[Self-Chat Inbound]` : `[WhatsApp Inbound]`);
-      const logLine = `${logHeader} From +${senderPhone} (${senderName}): "${text}"`;
-      console.log(`\n📥 ` + logLine);
-      logToFile(logLine);
-
-      try {
-        // Send typing indicator (composing)
-        try {
-          await sock.sendPresenceUpdate('composing', remoteJid);
-        } catch (_) {}
-
-        // Forward message to FastAPI backend
-        const res = await axios.post(FASTAPI_URL, {
-          sender_phone: senderPhone,
-          sender_name: senderName,
-          message_text: text,
-          message_id: msg.key.id,
-        }, { timeout: 35000 });
-
-        // CRITICAL RACE CONDITION CHECK:
-        // Did the owner open WhatsApp, read messages, or send a message while Gemini was generating the reply?
-        const timeSinceActiveNow = Date.now() - lastOwnerActiveTime;
-        if (isOwnerOnline || timeSinceActiveNow < (OWNER_INACTIVITY_DELAY_SECONDS * 1000) || humanActiveUntil.get(remoteJid) > Date.now()) {
-          console.log(`👤 [Cancelled AI reply] You opened/used WhatsApp while AI was generating. Suppressing AI reply to +${senderPhone}.`);
-          logToFile(`[Cancelled AI reply] Owner active during AI generation. Suppressed reply to +${senderPhone}.`);
-          await sock.sendPresenceUpdate('paused', remoteJid);
-          continue;
-        }
-
-        // If AI produced a reply and handoff is not active, send it!
-        if (res.data?.reply) {
-          if (remoteJid.endsWith('@g.us') || remoteJid.includes('@g.us')) {
-            console.log(`🚫 [Group Shield] Suppressed AI reply to group ${remoteJid}`);
+          // Check if all groups are ignored
+          const blacklist = getBlacklistConfig();
+          if (blacklist.ignore_all_groups !== false) {
             continue;
           }
-          const aiReply = res.data.reply;
-          console.log(`🤖 [Gemini AI Outbound] Replying to +${senderPhone}:\n"${aiReply}"\n`);
-          logToFile(`[Outbound AI] Replying to +${senderPhone}: "${aiReply}"`);
-          const sentResult = await sock.sendMessage(remoteJid, { text: aiReply });
-
-          if (sentResult?.key?.id) {
-            sentMessageIds.add(sentResult.key.id);
-            if (sentMessageIds.size > 500) {
-              const first = sentMessageIds.values().next().value;
-              sentMessageIds.delete(first);
-            }
-          }
-          await sock.sendPresenceUpdate('paused', remoteJid);
-        } else if (res.data?.handoff) {
-          console.log(`👤 [Handoff] Human takeover is active for +${senderPhone}. AI reply suppressed.`);
-          logToFile(`[Handoff] Active for +${senderPhone}. AI reply suppressed.`);
         }
-      } catch (err) {
-        console.error(`❌ [Error] Failed to process message with AI backend: ${err.message}`);
-        logToFile(`[Error] Failed to process message: ${err.message}`);
+
+        // Ignore messages sent by our AI bot
+        if (msg.key.id && sentMessageIds.has(msg.key.id)) {
+          continue;
+        }
+
+        const isSelf = isSelfChat(remoteJid);
+
+        // ====================================================
+        // 👤 OWNER SENT A MESSAGE (from phone or WhatsApp Web)
+        // ====================================================
+        if (msg.key.fromMe) {
+          handleOwnerActivityDetected('Owner sent message', remoteJid);
+
+          const selfText = (
+            content?.conversation || 
+            content?.extendedTextMessage?.text || 
+            ''
+          ).trim().toLowerCase();
+
+          // WhatsApp Remote Commands (Send in self-chat)
+          if (selfText === '!off' || selfText === '!stop' || selfText === 'stop' || selfText === 'turn off ai') {
+            bridgeSettings.isAiPaused = true;
+            bridgeSettings.pauseUntil = 0;
+            saveSettings(bridgeSettings);
+            console.log(`🛑 [AI Stopped] Owner sent command "${selfText}". Meera AI is now STOPPED.`);
+            logToFile(`[AI Stopped] Owner sent command "${selfText}".`);
+            const reply = '🛑 *Meera AI is now STOPPED.*\n\nAI will NOT reply to any messages.\n\nSend *!on* or *start* anytime to resume.';
+            const sent = await sock.sendMessage(remoteJid, { text: reply });
+            if (sent?.key?.id) sentMessageIds.add(sent.key.id);
+            continue;
+          }
+
+          if (selfText === '!on' || selfText === '!start' || selfText === 'start' || selfText === 'turn on ai') {
+            bridgeSettings.isAiPaused = false;
+            bridgeSettings.pauseUntil = 0;
+            lastOwnerActiveTime = 0;
+            isOwnerOnline = false;
+            humanActiveUntil.clear();
+            saveSettings(bridgeSettings);
+            console.log(`▶️ [AI Resumed] Owner sent command "${selfText}". Meera AI is now ACTIVE.`);
+            logToFile(`[AI Resumed] Owner sent command "${selfText}".`);
+            const reply = '▶️ *Meera AI is now ACTIVE!*\n\nAI will automatically reply when you are offline for 16s, and stops immediately whenever you are active on WhatsApp.';
+            const sent = await sock.sendMessage(remoteJid, { text: reply });
+            if (sent?.key?.id) sentMessageIds.add(sent.key.id);
+            continue;
+          }
+
+          if (selfText === '!status') {
+            const opStatus = getAiOperationalStatus();
+            let statusText = '';
+            if (bridgeSettings.isAiPaused) {
+              statusText = '🛑 *Meera AI is currently STOPPED manually*.\n\nSend *!on* or *start* to activate.';
+            } else if (isOwnerOnline) {
+              statusText = '👤 *Meera AI is STOPPED because you are active in WhatsApp*.\n\nMeera will NOT reply while you are online. When you go offline for 16 seconds, Meera will activate.';
+            } else if (opStatus.status === 'owner_active') {
+              statusText = `👤 *Meera AI is activating soon* (${opStatus.remainingSec}s until 16s offline delay completes).\n\nWhen you are offline for 16s, Meera will start helping users.`;
+            } else {
+              statusText = '🟢 *Meera AI is ACTIVE & READY*.\n\nShe auto-replies when you are offline for 16s+. Whenever you open WhatsApp, she stops immediately!';
+            }
+            const sent = await sock.sendMessage(remoteJid, { text: statusText });
+            if (sent?.key?.id) sentMessageIds.add(sent.key.id);
+            continue;
+          }
+
+          // 🛡️ CHAT TAKEOVER: You sent a message to a contact!
+          // Protect this conversation from Meera for 10 minutes!
+          if (!isSelf) {
+            const takeoverMs = (bridgeSettings.chatTakeoverMinutes || 10) * 60 * 1000;
+            humanActiveUntil.set(remoteJid, Date.now() + takeoverMs);
+            const cleanRecipient = remoteJid.replace('@s.whatsapp.net', '').replace('@g.us', '').replace('@lid', '');
+            console.log(`👤 [Owner in WhatsApp] You sent a message to +${cleanRecipient}. Meera AI stopped in this chat for ${bridgeSettings.chatTakeoverMinutes || 10}m!`);
+            logToFile(`[Owner Active] Sent message to +${cleanRecipient}. AI stopped in this chat.`);
+          }
+          continue;
+        }
+
+        // ====================================================
+        // 📥 INCOMING MESSAGE FROM ANOTHER CONTACT
+        // ====================================================
+        // Check if message was already marked read on open chat screen
+        if (msg.status === 4 || msg.status === 5) {
+          handleOwnerActivityDetected('Incoming message already read on open chat', remoteJid);
+          continue;
+        }
+
+        if (!text.trim()) continue;
+
+        const senderPhone = remoteJid.replace('@s.whatsapp.net', '').replace('@g.us', '').replace('@lid', '');
+        const senderName = msg.pushName || (isSelf ? 'You' : 'WhatsApp User');
+
+        // Self-chat protection: ignore personal notes unless prefixed with !ai or !meera
+        if (isSelf) {
+          const lowerSelf = text.trim().toLowerCase();
+          const isExplicitAi = lowerSelf.startsWith('!ai ') || lowerSelf.startsWith('!meera ');
+          if (!isExplicitAi) {
+            continue;
+          }
+        }
+
+        // Check blacklist
+        const blacklist = getBlacklistConfig();
+        const participant = msg.key.participant ? msg.key.participant.replace('@s.whatsapp.net', '').replace('@lid', '') : null;
+        if (isNumberIgnored(senderPhone, blacklist.ignored_numbers) || (participant && isNumberIgnored(participant, blacklist.ignored_numbers))) {
+          const blockedNumber = isNumberIgnored(senderPhone, blacklist.ignored_numbers) ? senderPhone : participant;
+          console.log(`🚫 [Blacklist Active] Contact +${blockedNumber} is in blacklist. Skipping AI auto-reply.`);
+          continue;
+        }
+
+        // Manual pause check
+        if (bridgeSettings.isAiPaused) {
+          console.log(`🛑 [AI Stopped] Meera is paused manually. Skipping message from +${senderPhone}.`);
+          continue;
+        }
+
+        // 1. CHAT TAKEOVER CHECK: Are you chatting with this specific person?
+        const takeoverUntil = humanActiveUntil.get(remoteJid);
+        if (takeoverUntil && Date.now() < takeoverUntil && !isSelf) {
+          const remainingMin = Math.ceil((takeoverUntil - Date.now()) / 60000);
+          console.log(`👤 [Human Conversation Active] You are chatting with +${senderPhone}. Meera AI stopped in this chat (${remainingMin}m remaining).`);
+          logToFile(`[Human Conversation] Suppressed AI reply for +${senderPhone}. Owner active in chat.`);
+          continue;
+        }
+
+        // 2. OWNER ONLINE CHECK: Owner is currently active/online in WhatsApp!
+        // User rule: When owner is online in WhatsApp, AI Meera MUST NOT reply to user messages!
+        if (isOwnerOnline && !isSelf) {
+          console.log(`👤 [Owner Online in WhatsApp] Owner is online on phone. Meera AI will NOT reply to message from +${senderPhone}.`);
+          logToFile(`[Owner Online] Suppressed AI reply for +${senderPhone}. Owner is online in WhatsApp.`);
+          continue; // Strictly NO reply!
+        }
+
+        // 3. 16-SECOND OFFLINE DELAY CHECK:
+        // User rule: When owner goes offline for 16 seconds, after that Meera comes online to reply!
+        const timeSinceOwnerActive = lastOwnerActiveTime > 0 ? (Date.now() - lastOwnerActiveTime) : Infinity;
+        const requiredOfflineMs = (bridgeSettings.ownerInactivitySeconds || 16) * 1000;
+        let waitTimeMs = (bridgeSettings.inboundWaitSeconds || 2) * 1000;
+
+        if (lastOwnerActiveTime > 0 && timeSinceOwnerActive < requiredOfflineMs) {
+          // Owner went offline recently, but 16 seconds have not elapsed yet!
+          waitTimeMs = requiredOfflineMs - timeSinceOwnerActive;
+          const waitSec = Math.ceil(waitTimeMs / 1000);
+          console.log(`⏳ [16s Offline Delay] Owner was active ${Math.floor(timeSinceOwnerActive / 1000)}s ago. Meera will activate in ${waitSec}s if owner remains offline.`);
+          logToFile(`[16s Offline Delay] Queued reply for +${senderPhone} for ${waitSec}s.`);
+        } else {
+          console.log(`🟢 [Meera Active] Owner has been offline for 16s+. Queueing reply for +${senderPhone} (${Math.ceil(waitTimeMs / 1000)}s buffer)...`);
+        }
+
+        const waitSecDisplay = Math.ceil(waitTimeMs / 1000);
+        const logHeader = isSelf ? `[Self-Chat Inbound]` : `[WhatsApp Inbound]`;
+        const logLine = `${logHeader} From +${senderPhone} (${senderName}): "${text}" (Buffer: ${waitSecDisplay}s)`;
+        console.log(`\n📥 ` + logLine);
+        logToFile(logLine);
+
+        // Cancel any existing pending timer for this conversation
+        if (pendingReplyTimers.has(remoteJid)) {
+          clearTimeout(pendingReplyTimers.get(remoteJid).timeoutId);
+          pendingReplyTimers.delete(remoteJid);
+        }
+
+        const msgSnapshot = msg;
+        const capturedRemoteJid = remoteJid;
+        const capturedSenderPhone = senderPhone;
+        const capturedSenderName = senderName;
+        const capturedText = text;
+
+        const timeoutId = setTimeout(async () => {
+          pendingReplyTimers.delete(capturedRemoteJid);
+
+          // Post-wait check 1: Was AI paused manually?
+          if (bridgeSettings.isAiPaused) {
+            console.log(`🛑 [Cancelled AI Reply] Meera was stopped manually. Suppressed reply for +${capturedSenderPhone}.`);
+            return;
+          }
+
+          // Post-wait check 2: Did owner text this contact during the wait?
+          const checkTakeover = humanActiveUntil.get(capturedRemoteJid);
+          if (checkTakeover && Date.now() < checkTakeover) {
+            console.log(`👤 [Human Conversation Active] Owner chatted with +${capturedSenderPhone}. Suppressed AI reply.`);
+            return;
+          }
+
+          // Post-wait check 3: Did owner open WhatsApp or become online during the wait?
+          if (isOwnerOnline) {
+            console.log(`👤 [Cancelled AI Reply] Owner opened WhatsApp / is online. Suppressed AI reply for +${capturedSenderPhone}.`);
+            logToFile(`[Cancelled AI Reply] Suppressed reply for +${capturedSenderPhone}. Owner became online.`);
+            return;
+          }
+
+          // Post-wait check 4: Has owner been offline for the full 16 seconds?
+          const postTimeSinceActive = lastOwnerActiveTime > 0 ? (Date.now() - lastOwnerActiveTime) : Infinity;
+          if (lastOwnerActiveTime > 0 && postTimeSinceActive < requiredOfflineMs) {
+            console.log(`👤 [Cancelled AI Reply] Owner was active recently. Suppressed AI reply for +${capturedSenderPhone}.`);
+            return;
+          }
+
+          // 🟢 OWNER IS TRULY OFFLINE (16s+): Meera Auto-Activates to help the contact!
+          console.log(`🟢 [Meera Auto-Activated] Owner offline for 16s+. Generating AI reply for +${capturedSenderPhone} (${capturedSenderName})...`);
+          logToFile(`[Meera Auto-Activated] Generating reply for +${capturedSenderPhone}`);
+
+          try {
+            try {
+              await sock.sendPresenceUpdate('composing', capturedRemoteJid);
+            } catch (_) {}
+
+            // Forward message to FastAPI backend
+            const res = await axios.post(FASTAPI_URL, {
+              sender_phone: capturedSenderPhone,
+              sender_name: capturedSenderName,
+              message_text: capturedText,
+              message_id: msgSnapshot.key.id,
+            }, { timeout: 35000 });
+
+            // CRITICAL RACE CONDITION CHECK:
+            // Did the owner open WhatsApp, read the chat, or send a message while Gemini was generating the reply?
+            const checkTimeSinceActive = lastOwnerActiveTime > 0 ? (Date.now() - lastOwnerActiveTime) : Infinity;
+            const finalTakeover = humanActiveUntil.get(capturedRemoteJid);
+            if (isOwnerOnline || (lastOwnerActiveTime > 0 && checkTimeSinceActive < requiredOfflineMs) || (finalTakeover && Date.now() < finalTakeover) || bridgeSettings.isAiPaused) {
+              console.log(`👤 [Cancelled AI reply] Owner became active in WhatsApp while AI was generating. Suppressing reply to +${capturedSenderPhone}.`);
+              logToFile(`[Cancelled AI reply] Suppressed reply to +${capturedSenderPhone}. Owner became active.`);
+              try { await sock.sendPresenceUpdate('paused', capturedRemoteJid); } catch (_) {}
+              return;
+            }
+
+            if (res.data?.reply) {
+              if (capturedRemoteJid.endsWith('@g.us') || capturedRemoteJid.includes('@g.us')) {
+                return;
+              }
+              const aiReply = res.data.reply;
+              console.log(`🤖 [Meera AI Outbound] Replying to +${capturedSenderPhone}:\n"${aiReply}"\n`);
+              logToFile(`[Outbound AI] Replying to +${capturedSenderPhone}: "${aiReply}"`);
+              const sentResult = await sock.sendMessage(capturedRemoteJid, { text: aiReply });
+
+              if (sentResult?.key?.id) {
+                sentMessageIds.add(sentResult.key.id);
+                if (sentMessageIds.size > 500) {
+                  const first = sentMessageIds.values().next().value;
+                  sentMessageIds.delete(first);
+                }
+              }
+              try { await sock.sendPresenceUpdate('paused', capturedRemoteJid); } catch (_) {}
+            } else if (res.data?.handoff) {
+              console.log(`👤 [Handoff] Human takeover active for +${capturedSenderPhone}. AI reply suppressed.`);
+              logToFile(`[Handoff] Active for +${capturedSenderPhone}. AI reply suppressed.`);
+            }
+          } catch (err) {
+            console.error(`❌ [Error] Failed to process message with AI backend: ${err.message}`);
+            logToFile(`[Error] Failed to process message: ${err.message}`);
+          }
+        }, waitTimeMs);
+
+        pendingReplyTimers.set(capturedRemoteJid, {
+          timeoutId,
+          msgId: msgSnapshot.key.id,
+          senderPhone: capturedSenderPhone
+        });
       }
-    }
-  });
+    });
+
+    setInterval(subscribeOwnerPresence, 20000);
+
   } catch (err) {
     console.error('Error in startWhatsAppSocket:', err);
     logToFile(`[Error] startWhatsAppSocket: ${err.message}`);
@@ -513,7 +865,7 @@ async function startWhatsAppSocket() {
 }
 
 // ----------------------------------------------------
-// REST API Endpoints for Dashboard & Manual Agent Send
+// REST API Endpoints & Control Dashboard
 // ----------------------------------------------------
 
 app.get('/', (req, res) => {
@@ -521,31 +873,244 @@ app.get('/', (req, res) => {
 });
 
 app.get('/status', (req, res) => {
-
   res.json({
     connected: isConnected,
     phone: userPhone,
     qr: currentQRDataURL,
+    operationalStatus: getAiOperationalStatus(),
   });
+});
+
+app.get('/ai-status', (req, res) => {
+  const opStatus = getAiOperationalStatus();
+  const timeSinceActive = lastOwnerActiveTime > 0 ? Math.floor((Date.now() - lastOwnerActiveTime) / 1000) : null;
+  res.json({
+    connected: isConnected,
+    phone: userPhone,
+    operationalStatus: opStatus,
+    settings: bridgeSettings,
+    lastOwnerActiveTime,
+    timeSinceOwnerActiveSec: timeSinceActive
+  });
+});
+
+app.post('/pause', (req, res) => {
+  const { durationMinutes } = req.body || {};
+  bridgeSettings.isAiPaused = true;
+  bridgeSettings.pauseUntil = (durationMinutes && Number(durationMinutes) > 0)
+    ? Date.now() + (Number(durationMinutes) * 60 * 1000)
+    : 0;
+  saveSettings(bridgeSettings);
+  const opStatus = getAiOperationalStatus();
+  console.log(`🛑 [API] Meera AI paused: ${opStatus.description}`);
+  logToFile(`[API] AI paused: ${opStatus.description}`);
+  res.json({ success: true, operationalStatus: opStatus });
+});
+
+app.post('/resume', (req, res) => {
+  bridgeSettings.isAiPaused = false;
+  bridgeSettings.pauseUntil = 0;
+  lastOwnerActiveTime = 0;
+  humanActiveUntil.clear();
+  saveSettings(bridgeSettings);
+  const opStatus = getAiOperationalStatus();
+  console.log(`▶️ [API] Meera AI resumed.`);
+  logToFile(`[API] AI resumed.`);
+  res.json({ success: true, operationalStatus: opStatus });
+});
+
+app.post('/toggle-ai', (req, res) => {
+  if (bridgeSettings.isAiPaused) {
+    bridgeSettings.isAiPaused = false;
+    bridgeSettings.pauseUntil = 0;
+    lastOwnerActiveTime = 0;
+    humanActiveUntil.clear();
+  } else {
+    bridgeSettings.isAiPaused = true;
+    bridgeSettings.pauseUntil = 0;
+  }
+  saveSettings(bridgeSettings);
+  const opStatus = getAiOperationalStatus();
+  console.log(`🔄 [API] Meera AI toggled to: ${opStatus.status}`);
+  logToFile(`[API] AI toggled to: ${opStatus.status}`);
+  res.json({ success: true, operationalStatus: opStatus });
+});
+
+app.get('/settings', (req, res) => {
+  res.json(bridgeSettings);
+});
+
+app.post('/settings', (req, res) => {
+  const { ownerInactivitySeconds, inboundWaitSeconds, chatTakeoverMinutes } = req.body || {};
+  if (typeof ownerInactivitySeconds === 'number' && ownerInactivitySeconds >= 1) {
+    bridgeSettings.ownerInactivitySeconds = ownerInactivitySeconds;
+  }
+  if (typeof inboundWaitSeconds === 'number' && inboundWaitSeconds >= 1) {
+    bridgeSettings.inboundWaitSeconds = inboundWaitSeconds;
+  }
+  if (typeof chatTakeoverMinutes === 'number' && chatTakeoverMinutes >= 1) {
+    bridgeSettings.chatTakeoverMinutes = chatTakeoverMinutes;
+  }
+  saveSettings(bridgeSettings);
+  res.json({ success: true, settings: bridgeSettings });
 });
 
 app.get('/qr', (req, res) => {
   if (isConnected) {
-    return res.send(`<!DOCTYPE html><html><head><title>WhatsApp AI - Connected</title><meta name="viewport" content="width=device-width,initial-scale=1"></head><body style="font-family:system-ui,-apple-system,sans-serif;text-align:center;padding:50px 20px;background:#0b141a;color:#e9edef;">
-      <div style="max-width:400px;margin:0 auto;background:#111b21;padding:30px;border-radius:16px;box-shadow:0 8px 24px rgba(0,0,0,0.5);">
-        <div style="font-size:48px;margin-bottom:10px;">✅</div>
-        <h2 style="color:#25D366;margin:0 0 10px;">WhatsApp Connected!</h2>
-        <p style="font-size:18px;margin:5px 0;">Logged in as: <b>+${userPhone}</b></p>
-        <p style="color:#8696a0;font-size:14px;margin-top:20px;">🤖 Gemini AI is now actively replying to your WhatsApp messages.</p>
+    const op = getAiOperationalStatus();
+    const isPaused = bridgeSettings.isAiPaused;
+    return res.send(`<!DOCTYPE html>
+<html>
+<head>
+  <title>Meera AI - WhatsApp Dashboard</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: #0b141a; color: #e9edef; padding: 24px 16px; }
+    .container { max-width: 520px; margin: 0 auto; }
+    .card { background: #111b21; border-radius: 16px; padding: 22px; border: 1px solid #202c33; box-shadow: 0 8px 24px rgba(0,0,0,0.5); margin-bottom: 16px; }
+    .badge { display: inline-flex; align-items: center; gap: 6px; padding: 6px 14px; border-radius: 20px; font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; }
+    .badge-active { background: #005c4b; color: #25D366; border: 1px solid #25D366; }
+    .badge-stopped { background: #5c181e; color: #ff5c6d; border: 1px solid #ff5c6d; }
+    .badge-owner { background: #5c4b00; color: #ffcf33; border: 1px solid #ffcf33; }
+    .btn-main { width: 100%; border: none; padding: 14px 20px; border-radius: 12px; font-size: 16px; font-weight: 700; cursor: pointer; transition: 0.2s all; display: flex; align-items: center; justify-content: center; gap: 8px; margin-top: 14px; }
+    .btn-stop { background: #ea4335; color: #fff; }
+    .btn-stop:hover { background: #d33828; }
+    .btn-resume { background: #25D366; color: #111b21; }
+    .btn-resume:hover { background: #20bd5a; }
+    .btn-secondary { background: #202c33; color: #e9edef; border: 1px solid #2a3942; padding: 9px 14px; border-radius: 8px; font-size: 12px; font-weight: 600; cursor: pointer; transition: 0.2s all; }
+    .btn-secondary:hover { background: #2a3942; }
+    .info-row { display: flex; justify-content: space-between; align-items: center; padding: 10px 0; border-bottom: 1px solid #1f2c34; font-size: 13px; }
+    .info-row:last-child { border-bottom: none; }
+    .info-label { color: #8696a0; }
+    .info-val { color: #e9edef; font-weight: 600; }
+    .hint-box { background: #182229; border-radius: 10px; padding: 14px; font-size: 12px; line-height: 1.5; color: #8696a0; border-left: 3px solid #25D366; }
+    .code-tag { background: #111b21; color: #25D366; padding: 2px 6px; border-radius: 4px; font-family: monospace; font-weight: bold; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    
+    <!-- Status Card -->
+    <div class="card" style="text-align:center;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
+        <span style="font-size:12px;color:#8696a0;">WhatsApp Link: <b>+${userPhone}</b></span>
+        <span id="statusBadge" class="badge ${isPaused ? 'badge-stopped' : (op.status === 'owner_active' ? 'badge-owner' : 'badge-active')}">
+          ${isPaused ? '🛑 AI STOPPED' : (op.status === 'owner_active' ? '👤 OWNER IN WHATSAPP' : '🟢 AI ACTIVE')}
+        </span>
       </div>
-    </body></html>`);
+
+      <h2 style="font-size:22px;color:#e9edef;margin-bottom:6px;">Meera AI Timing Plan</h2>
+      <p id="statusDesc" style="font-size:13px;color:#8696a0;min-height:20px;">${op.description}</p>
+
+      <!-- Main Action Button -->
+      <button id="toggleBtn" onclick="toggleAi()" class="btn-main ${isPaused ? 'btn-resume' : 'btn-stop'}">
+        ${isPaused ? '▶️ START / RESUME MEERA AI' : '🛑 STOP MEERA AI MANUALLY'}
+      </button>
+    </div>
+
+    <!-- Active Timing Rules Card -->
+    <div class="card">
+      <h3 style="font-size:14px;color:#25D366;margin-bottom:12px;text-transform:uppercase;letter-spacing:0.5px;">⚡ Configured Timing Plan</h3>
+      <div class="info-row">
+        <span class="info-label">When you are active/online in WhatsApp:</span>
+        <span class="info-val" style="color:#ffcf33;">Meera stops immediately (NO replies)</span>
+      </div>
+      <div class="info-row">
+        <span class="info-label">When you go offline / close WhatsApp:</span>
+        <span class="info-val" style="color:#25D366;">16s offline delay starts</span>
+      </div>
+      <div class="info-row">
+        <span class="info-label">After 16s of owner inactivity:</span>
+        <span class="info-val" style="color:#25D366;">Meera comes online & replies to users</span>
+      </div>
+      <div class="info-row">
+        <span class="info-label">When you message a contact:</span>
+        <span class="info-val" style="color:#ff5c6d;">Meera stops in that chat for 10 mins</span>
+      </div>
+      <div class="info-row">
+        <span class="info-label">Links in WhatsApp Groups:</span>
+        <span class="info-val" style="color:#ff5c6d;">100% Blocked (Never responds or replies)</span>
+      </div>
+    </div>
+
+    <!-- WhatsApp Commands Guide -->
+    <div class="card">
+      <h3 style="font-size:14px;color:#e9edef;margin-bottom:10px;">📱 Phone Commands (Optional)</h3>
+      <div class="hint-box">
+        • Send <span class="code-tag">!off</span> or <span class="code-tag">stop</span> &rarr; <b>Stops AI manually</b><br>
+        • Send <span class="code-tag">!on</span> or <span class="code-tag">start</span> &rarr; <b>Resumes AI auto-replies</b><br>
+        • Send <span class="code-tag">!status</span> &rarr; <b>Checks live status</b>
+      </div>
+    </div>
+
+    <!-- Tools & Reset -->
+    <div style="display:flex;gap:10px;justify-content:center;margin-top:10px;">
+      <a href="/logs" target="_blank" class="btn-secondary" style="text-decoration:none;display:inline-block;">📄 Live Bridge Logs</a>
+      <a href="/reset" class="btn-secondary" style="text-decoration:none;display:inline-block;color:#f15c6d;">🔄 Reset & Re-link</a>
+    </div>
+
+  </div>
+
+  <script>
+    async function updateUi() {
+      try {
+        const res = await fetch('/ai-status');
+        const data = await res.json();
+        const op = data.operationalStatus || {};
+        const isPaused = data.settings?.isAiPaused;
+        const badge = document.getElementById('statusBadge');
+        const desc = document.getElementById('statusDesc');
+        const btn = document.getElementById('toggleBtn');
+
+        desc.textContent = op.description || '';
+
+        if (isPaused) {
+          badge.className = 'badge badge-stopped';
+          badge.textContent = '🛑 AI STOPPED';
+          btn.className = 'btn-main btn-resume';
+          btn.innerHTML = '▶️ START / RESUME MEERA AI';
+        } else if (op.status === 'owner_active') {
+          badge.className = 'badge badge-owner';
+          badge.textContent = '👤 OWNER IN WHATSAPP';
+          btn.className = 'btn-main btn-stop';
+          btn.innerHTML = '🛑 STOP MEERA AI MANUALLY';
+        } else {
+          badge.className = 'badge badge-active';
+          badge.textContent = '🟢 AI ACTIVE';
+          btn.className = 'btn-main btn-stop';
+          btn.innerHTML = '🛑 STOP MEERA AI MANUALLY';
+        }
+      } catch (_) {}
+    }
+
+    async function toggleAi() {
+      const btn = document.getElementById('toggleBtn');
+      btn.disabled = true;
+      try {
+        await fetch('/toggle-ai', { method: 'POST' });
+        await updateUi();
+      } catch (err) {
+        alert('Error: ' + err.message);
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    setInterval(updateUi, 1000);
+  </script>
+</body>
+</html>`);
   }
+
+  // Not connected yet: render QR or Pairing Code page
   if (!currentQRDataURL) {
     return res.send(`<!DOCTYPE html><html><head><title>Generating QR...</title><meta http-equiv="refresh" content="2"></head><body style="font-family:system-ui,-apple-system,sans-serif;text-align:center;padding:50px;background:#0b141a;color:#e9edef;">
       <h2>Generating WhatsApp QR Code...</h2>
       <p style="color:#8696a0;">Please wait a moment...</p>
     </body></html>`);
   }
+
   res.send(`<!DOCTYPE html><html><head><title>Link WhatsApp AI</title><meta name="viewport" content="width=device-width,initial-scale=1"></head><body style="font-family:system-ui,-apple-system,sans-serif;text-align:center;padding:24px 14px;background:#0b141a;color:#e9edef;">
     <div style="max-width:440px;margin:0 auto;background:#111b21;padding:24px 20px;border-radius:16px;box-shadow:0 8px 24px rgba(0,0,0,0.5);">
       <h2 style="color:#25D366;margin:0 0 4px;font-size:22px;">Link WhatsApp with Meera AI</h2>
@@ -674,8 +1239,6 @@ app.post('/pair-code', async (req, res) => {
 app.get('/reset', async (req, res) => {
   try {
     if (isSessionCorruptedOrUnregistered()) {
-      console.log('[WhatsApp Web] Stale/unregistered session detected. Clearing credentials for clean pairing...');
-      logToFile('[Auth] Auto-cleared stale credentials with registered=false');
       clearAuthDirectory();
     }
     if (sock) {
@@ -701,8 +1264,6 @@ app.get('/reset', async (req, res) => {
   }
 });
 
-
-
 app.get('/logs', (req, res) => {
   try {
     const logPath = path.join(__dirname, 'bridge.log');
@@ -716,7 +1277,6 @@ app.get('/logs', (req, res) => {
 });
 
 app.get('/blacklist', (req, res) => {
-
   res.json(getBlacklistConfig());
 });
 
@@ -735,7 +1295,6 @@ app.post('/blacklist', (req, res) => {
 });
 
 app.post('/send', async (req, res) => {
-
   const { phone, text } = req.body;
   if (!sock || !isConnected) {
     return res.status(503).json({ error: 'WhatsApp not connected. Please scan QR code first.' });
@@ -756,11 +1315,6 @@ app.post('/send', async (req, res) => {
 
 app.post('/logout', async (req, res) => {
   try {
-    if (isSessionCorruptedOrUnregistered()) {
-      console.log('[WhatsApp Web] Stale/unregistered session detected. Clearing credentials for clean pairing...');
-      logToFile('[Auth] Auto-cleared stale credentials with registered=false');
-      clearAuthDirectory();
-    }
     if (sock) {
       await sock.logout();
     }
@@ -779,17 +1333,13 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`[WhatsApp Web Bridge Server] Listening on http://0.0.0.0:${PORT}`);
   startWhatsAppSocket();
 
-  // Cloud Keep-Alive: Prevents Render free instances from going to sleep
   const externalUrl = process.env.RENDER_EXTERNAL_URL || process.env.APP_URL;
   if (externalUrl) {
     console.log(`[Cloud Keep-Alive] Initialized self-pinging every 10m for ${externalUrl}`);
     setInterval(async () => {
       try {
         await axios.get(`${externalUrl}/status`, { timeout: 10000 });
-        console.log(`[Cloud Keep-Alive] Successfully pinged ${externalUrl}/status`);
-      } catch (e) {
-        console.log(`[Cloud Keep-Alive] Ping notice: ${e.message}`);
-      }
-    }, 10 * 60 * 1000); // Every 10 minutes
+      } catch (_) {}
+    }, 10 * 60 * 1000);
   }
 });

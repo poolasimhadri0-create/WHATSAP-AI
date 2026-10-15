@@ -197,6 +197,59 @@ async def bridge_logs_proxy(request: Request):
     except Exception as e:
         return Response(content=f"Error reading logs: {e}", status_code=500, media_type="text/plain")
 
+@app.api_route("/ai-status", methods=["GET", "HEAD"])
+async def bridge_ai_status_proxy(request: Request):
+    """Proxies AI paused/active status."""
+    if request.method == "HEAD":
+        return Response(status_code=200)
+    try:
+        resp = await fetch_from_bridge("GET", "/ai-status", timeout=5.0)
+        return Response(content=resp.content, status_code=resp.status_code, media_type=resp.headers.get("content-type"))
+    except Exception as e:
+        return {"error": str(e), "isAiPaused": False}
+
+@app.post("/pause")
+async def bridge_pause_proxy(request: Request):
+    """Proxies AI pause request."""
+    try:
+        body = await request.json() if request.headers.get("content-length") and int(request.headers.get("content-length")) > 0 else {}
+        resp = await fetch_from_bridge("POST", "/pause", json_data=body, timeout=10.0)
+        return Response(content=resp.content, status_code=resp.status_code, media_type=resp.headers.get("content-type"))
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.post("/resume")
+async def bridge_resume_proxy():
+    """Proxies AI resume request."""
+    try:
+        resp = await fetch_from_bridge("POST", "/resume", timeout=10.0)
+        return Response(content=resp.content, status_code=resp.status_code, media_type=resp.headers.get("content-type"))
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.post("/toggle-ai")
+async def bridge_toggle_proxy():
+    """Proxies AI toggle request."""
+    try:
+        resp = await fetch_from_bridge("POST", "/toggle-ai", timeout=10.0)
+        return Response(content=resp.content, status_code=resp.status_code, media_type=resp.headers.get("content-type"))
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.api_route("/bridge-settings", methods=["GET", "POST"])
+async def bridge_settings_proxy(request: Request):
+    """Proxies bridge settings."""
+    try:
+        if request.method == "POST":
+            body = await request.json()
+            resp = await fetch_from_bridge("POST", "/settings", json_data=body, timeout=10.0)
+        else:
+            resp = await fetch_from_bridge("GET", "/settings", timeout=5.0)
+        return Response(content=resp.content, status_code=resp.status_code, media_type=resp.headers.get("content-type"))
+    except Exception as e:
+        return {"error": str(e)}
+
+
 # 1. Direct Webhook Mounts (Meta WhatsApp standard endpoint: /webhook/whatsapp)
 app.include_router(webhook_router, prefix="/webhook", tags=["Meta WhatsApp Webhook"])
 
