@@ -56,6 +56,38 @@ function logToFile(msg) {
     fs.appendFileSync(logPath, `[${timestamp}] ${msg}\n`);
   } catch (_) {}
 }
+function clearAuthDirectory() {
+  const authDir = path.join(__dirname, 'auth_info_baileys');
+  try {
+    if (fs.existsSync(authDir)) {
+      const files = fs.readdirSync(authDir);
+      for (const file of files) {
+        try {
+          fs.rmSync(path.join(authDir, file), { recursive: true, force: true });
+        } catch (_) {}
+      }
+    }
+  } catch (err) {
+    console.error('Error clearing auth directory contents:', err.message);
+  }
+}
+
+function isSessionCorruptedOrUnregistered() {
+  const credsPath = path.join(__dirname, 'auth_info_baileys', 'creds.json');
+  try {
+    if (fs.existsSync(credsPath)) {
+      const raw = fs.readFileSync(credsPath, 'utf8');
+      const data = JSON.parse(raw);
+      if (data && data.registered === false) {
+        return true;
+      }
+    }
+  } catch (_) {
+    return true;
+  }
+  return false;
+}
+
 
 // ----------------------------------------------------
 // Blacklist / Ignored Numbers & Groups Configuration
@@ -118,6 +150,11 @@ async function startWhatsAppSocket() {
   isStartingSocket = true;
 
   try {
+    if (isSessionCorruptedOrUnregistered()) {
+      console.log('[WhatsApp Web] Stale/unregistered session detected. Clearing credentials for clean pairing...');
+      logToFile('[Auth] Auto-cleared stale credentials with registered=false');
+      clearAuthDirectory();
+    }
     if (sock) {
       try {
         sock.ev.removeAllListeners();
@@ -191,12 +228,7 @@ async function startWhatsAppSocket() {
       if (isLoggedOut) {
         console.log('[WhatsApp Web] Session logged out from phone. Clearing auth cache for new link...');
         logToFile('[Connection] Explicit logout. Resetting auth directory...');
-        const authDir = path.join(__dirname, 'auth_info_baileys');
-        try {
-          if (fs.existsSync(authDir)) {
-            fs.rmSync(authDir, { recursive: true, force: true });
-          }
-        } catch (_) {}
+        clearAuthDirectory();
         setTimeout(startWhatsAppSocket, 1500);
       } else {
         // Stream conflict, server restart, temporary network drop - NEVER wipe auth, ALWAYS reconnect!
@@ -604,6 +636,11 @@ app.post('/pair-code', async (req, res) => {
 
 app.get('/reset', async (req, res) => {
   try {
+    if (isSessionCorruptedOrUnregistered()) {
+      console.log('[WhatsApp Web] Stale/unregistered session detected. Clearing credentials for clean pairing...');
+      logToFile('[Auth] Auto-cleared stale credentials with registered=false');
+      clearAuthDirectory();
+    }
     if (sock) {
       try {
         sock.ev.removeAllListeners();
@@ -611,10 +648,7 @@ app.get('/reset', async (req, res) => {
       } catch (_) {}
       sock = null;
     }
-    const authDir = path.join(__dirname, 'auth_info_baileys');
-    if (fs.existsSync(authDir)) {
-      fs.rmSync(authDir, { recursive: true, force: true });
-    }
+    clearAuthDirectory();
     isConnected = false;
     currentQR = null;
     currentQRDataURL = null;
@@ -685,13 +719,15 @@ app.post('/send', async (req, res) => {
 
 app.post('/logout', async (req, res) => {
   try {
+    if (isSessionCorruptedOrUnregistered()) {
+      console.log('[WhatsApp Web] Stale/unregistered session detected. Clearing credentials for clean pairing...');
+      logToFile('[Auth] Auto-cleared stale credentials with registered=false');
+      clearAuthDirectory();
+    }
     if (sock) {
       await sock.logout();
     }
-    const authDir = path.join(__dirname, 'auth_info_baileys');
-    if (fs.existsSync(authDir)) {
-      fs.rmSync(authDir, { recursive: true, force: true });
-    }
+    clearAuthDirectory();
     isConnected = false;
     currentQR = null;
     currentQRDataURL = null;

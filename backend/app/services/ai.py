@@ -61,15 +61,16 @@ async def call_gemini_api(
                     candidates = data.get("candidates", [])
                     if candidates and "content" in candidates[0]:
                         parts = candidates[0]["content"].get("parts", [])
-                        if parts and "text" in parts[0]:
-                            return parts[0]["text"]
+                        text_parts = [p["text"] for p in parts if "text" in p and p["text"]]
+                        if text_parts:
+                            return "\n".join(text_parts).strip()
                 else:
                     logger.warning(f"Gemini {m} returned {response.status_code}")
             except Exception as e:
                 logger.warning(f"Gemini attempt with {m} failed: {e}")
                 continue
 
-    return ""
+        return ""
 
 DEFAULT_SYSTEM_PROMPT = """You are "Meera", a witty, sweet, funny, and charming personal AI assistant chatting on WhatsApp on behalf of Simhadri.
 
