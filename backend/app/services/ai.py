@@ -37,12 +37,13 @@ async def call_gemini_api(
     Reuses persistent HTTP connections and limits output tokens for snappy WhatsApp replies.
     """
     # Clean and prioritize fastest verified models
-    requested = model.replace("models/", "") if model else "gemini-3.1-flash-lite"
-    candidate_models = [requested]
-    if requested != "gemini-3.1-flash-lite":
-        candidate_models.append("gemini-3.1-flash-lite")
-    if "gemini-3.5-flash-lite" not in candidate_models:
-        candidate_models.append("gemini-3.5-flash-lite")
+    requested = model.replace("models/", "") if model else "gemini-3.8-flash"
+    candidate_models = []
+    if requested:
+        candidate_models.append(requested)
+    for verified in ["gemini-3.8-flash", "gemini-flash-latest", "gemini-flash-lite-latest", "gemini-3.1-flash-lite", "gemini-2.5-flash"]:
+        if verified not in candidate_models:
+            candidate_models.append(verified)
 
     # Format multi-turn contents for Gemini
     contents = []
@@ -275,7 +276,7 @@ async def generate_llm_reply(
         try:
             model_to_use = bot_config.get("model_name", "")
             if not model_to_use or not model_to_use.startswith("gemini"):
-                model_to_use = settings.LLM_MODEL or "gemini-3.1-flash-lite"
+                model_to_use = settings.LLM_MODEL or "gemini-3.8-flash"
             raw_reply = await call_gemini_api(
                 api_key=settings.GEMINI_API_KEY,
                 model=model_to_use,

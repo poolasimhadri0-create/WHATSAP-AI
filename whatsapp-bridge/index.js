@@ -35,6 +35,8 @@ process.on('unhandledRejection', (reason) => {
   logToFile(`[UnhandledRejection] ${reason}`);
 });
 
+import NodeCache from '@cacheable/node-cache';
+
 let sock = null;
 let currentQR = null;
 let currentQRDataURL = null;
@@ -45,6 +47,42 @@ const humanActiveUntil = new Map();
 const pendingReplyTimers = new Map();
 let lastOwnerActiveTime = 0;
 let isOwnerOnline = false;
+
+// 🛡️ E2EE Message Store & Retry Cache to prevent "Waiting for this message" error
+const msgRetryCounterCache = new NodeCache();
+const messageStore = new Map();
+const MAX_SAVED_MESSAGES = 3000;
+
+function saveToMessageStore(id, message) {
+  if (!id || !message) return;
+  messageStore.set(id, message);
+  if (messageStore.size > MAX_SAVED_MESSAGES) {
+    const oldestKey = messageStore.keys().next().value;
+    messageStore.delete(oldestKey);
+  }
+}
+
+async function sendSafeMessage(jid, content, options = {}) {
+  if (!sock) return null;
+  try {
+    const sent = await sock.sendMessage(jid, content, options);
+    if (sent?.key?.id) {
+      sentMessageIds.add(sent.key.id);
+      if (sentMessageIds.size > 500) {
+        const first = sentMessageIds.values().next().value;
+        sentMessageIds.delete(first);
+      }
+      if (sent.message) {
+        saveToMessageStore(sent.key.id, sent.message);
+      }
+    }
+    return sent;
+  } catch (err) {
+    console.error(`❌ [SendMessage Error] Failed sending to ${jid}:`, err.message);
+    logToFile(`[SendMessage Error] ${jid}: ${err.message}`);
+    throw err;
+  }
+}
 
 // -------------------------------------------------------------------
 // TIMING & AUTO-REPLY RULES:
@@ -363,6 +401,7 @@ async function startWhatsAppSocket() {
         creds: state.creds,
         keys: makeCacheableSignalKeyStore(state.keys, logger),
       },
+      msgRetryCounterCache,
       browser: Browsers.macOS('Desktop'),
       syncFullHistory: false,
       markOnlineOnConnect: false,
@@ -371,8 +410,11 @@ async function startWhatsAppSocket() {
       defaultQueryTimeoutMs: 60000,
       keepAliveIntervalMs: 25000,
       retryRequestDelayMs: 2000,
-      getMessage: async () => {
-        return { conversation: '' };
+      getMessage: async (key) => {
+        if (key?.id && messageStore.has(key.id)) {
+          return messageStore.get(key.id);
+        }
+        return undefined; // Must return undefined so Baileys does not corrupt the retry
       },
     });
 
@@ -559,6 +601,9 @@ async function startWhatsAppSocket() {
 
       for (const msg of m.messages) {
         if (!msg.message) continue;
+        if (msg.key?.id) {
+          saveToMessageStore(msg.key.id, msg.message);
+        }
         const remoteJid = msg.key.remoteJid;
         if (!remoteJid || remoteJid.includes('@broadcast') || remoteJid.includes('@newsletter')) continue;
 
@@ -623,8 +668,7 @@ async function startWhatsAppSocket() {
             console.log(`🛑 [AI Stopped] Owner sent command "${selfText}". Meera AI is now STOPPED.`);
             logToFile(`[AI Stopped] Owner sent command "${selfText}".`);
             const reply = '🛑 *Meera AI is now STOPPED.*\n\nAI will NOT reply to any messages.\n\nSend *!on* or *start* anytime to resume.';
-            const sent = await sock.sendMessage(remoteJid, { text: reply });
-            if (sent?.key?.id) sentMessageIds.add(sent.key.id);
+            await sendSafeMessage(remoteJid, { text: reply });
             continue;
           }
 
@@ -638,8 +682,7 @@ async function startWhatsAppSocket() {
             console.log(`▶️ [AI Resumed] Owner sent command "${selfText}". Meera AI is now ACTIVE.`);
             logToFile(`[AI Resumed] Owner sent command "${selfText}".`);
             const reply = '▶️ *Meera AI is now ACTIVE!*\n\nAI will automatically reply when you are offline for 16s, and stops immediately whenever you are active on WhatsApp.';
-            const sent = await sock.sendMessage(remoteJid, { text: reply });
-            if (sent?.key?.id) sentMessageIds.add(sent.key.id);
+            await sendSafeMessage(remoteJid, { text: reply });
             continue;
           }
 
@@ -655,8 +698,7 @@ async function startWhatsAppSocket() {
             } else {
               statusText = '🟢 *Meera AI is ACTIVE & READY*.\n\nShe auto-replies when you are offline for 16s+. Whenever you open WhatsApp, she stops immediately!';
             }
-            const sent = await sock.sendMessage(remoteJid, { text: statusText });
-            if (sent?.key?.id) sentMessageIds.add(sent.key.id);
+            await sendSafeMessage(remoteJid, { text: statusText });
             continue;
           }
 
@@ -835,15 +877,7 @@ async function startWhatsAppSocket() {
               const aiReply = res.data.reply;
               console.log(`🤖 [Meera AI Outbound] Replying to +${capturedSenderPhone}:\n"${aiReply}"\n`);
               logToFile(`[Outbound AI] Replying to +${capturedSenderPhone}: "${aiReply}"`);
-              const sentResult = await sock.sendMessage(capturedRemoteJid, { text: aiReply });
-
-              if (sentResult?.key?.id) {
-                sentMessageIds.add(sentResult.key.id);
-                if (sentMessageIds.size > 500) {
-                  const first = sentMessageIds.values().next().value;
-                  sentMessageIds.delete(first);
-                }
-              }
+              await sendSafeMessage(capturedRemoteJid, { text: aiReply });
               try { await sock.sendPresenceUpdate('paused', capturedRemoteJid); } catch (_) {}
             } else if (res.data?.handoff) {
               console.log(`👤 [Handoff] Human takeover active for +${capturedSenderPhone}. AI reply suppressed.`);

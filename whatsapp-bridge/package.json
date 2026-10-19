@@ -8,6 +8,7 @@
     "start": "node index.js"
   },
   "dependencies": {
+    "@cacheable/node-cache": "^1.7.6",
     "@whiskeysockets/baileys": "^6.7.12",
     "axios": "^1.7.2",
     "cors": "^2.8.5",
