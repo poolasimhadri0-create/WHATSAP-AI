@@ -99,7 +99,7 @@ function getSettings() {
   const defaults = {
     isAiPaused: false,
     pauseUntil: 0,
-    inboundWaitSeconds: 10,       // 10s smart buffer so owner has time to respond or open chat
+    inboundWaitSeconds: 0,        // Instant reply when owner is offline (no wait)
     ownerInactivitySeconds: 300,  // 5 mins idle fallback (only activates when owner has closed WhatsApp)
     chatTakeoverMinutes: 5,       // When owner texts someone, Meera stops in that chat for 5 mins
   };
@@ -763,12 +763,12 @@ async function startWhatsAppSocket() {
           continue; // Strictly NO reply!
         }
 
-        // 3. INBOUND BUFFER (e.g. 10s wait so owner has time to respond):
-        const waitTimeMs = (bridgeSettings.inboundWaitSeconds || 10) * 1000;
+        // 3. INBOUND BUFFER (0s = Instant reply when offline):
+        const waitTimeMs = (bridgeSettings.inboundWaitSeconds || 0) * 1000;
         if (waitTimeMs > 0) {
           console.log(`⏳ [Inbound Buffer] Message received from +${senderPhone}. Waiting ${Math.ceil(waitTimeMs / 1000)}s buffer... If you open WhatsApp, AI reply will cancel.`);
         } else {
-          console.log(`⚡ [Meera Active] Replying to +${senderPhone}...`);
+          console.log(`⚡ [Meera Instant] Owner offline. Replying instantly to +${senderPhone}...`);
         }
 
         const waitSecDisplay = Math.ceil(waitTimeMs / 1000);
@@ -1032,8 +1032,8 @@ app.get('/qr', (req, res) => {
         <span class="info-val" style="color:#25D366;">Meera auto-activates to help users</span>
       </div>
       <div class="info-row">
-        <span class="info-label">Inbound Reply Buffer:</span>
-        <span class="info-val" style="color:#25D366;">10 seconds (Cancels if you open chat)</span>
+        <span class="info-label">Inbound Reply Speed:</span>
+        <span class="info-val" style="color:#25D366;">Instant (0s delay when you close WhatsApp)</span>
       </div>
       <div class="info-row">
         <span class="info-label">When you message a contact:</span>
