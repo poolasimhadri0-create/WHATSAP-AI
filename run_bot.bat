@@ -16,10 +16,18 @@ if exist "%ROOT_DIR%..\backend" (
 for /f "tokens=5" %%a in ('netstat -aon ^| findstr :8000') do taskkill /f /pid %%a >nul 2>&1
 for /f "tokens=5" %%a in ('netstat -aon ^| findstr :3001') do taskkill /f /pid %%a >nul 2>&1
 
-echo [1/2] Starting Gemini AI Engine...
-start "WhatsApp AI Engine" /min cmd /c "cd /d "%ROOT_DIR%backend" && .\venv\Scripts\python.exe -m uvicorn app.main:app --host 0.0.0.0 --port 8000"
+echo [1/2] Starting Gemini AI Engine (FastAPI)...
+start "WhatsApp AI Engine" /min cmd /k "cd /d "%ROOT_DIR%backend" && .\venv\Scripts\python.exe -m uvicorn app.main:app --host 0.0.0.0 --port 8000"
 
-timeout /t 4 /nobreak >nul
+echo Waiting for AI backend to be ready...
+for /l %%i in (1,1,10) do (
+    curl -s http://127.0.0.1:8000/health >nul 2>&1
+    if not errorlevel 1 goto backend_ready
+    timeout /t 1 /nobreak >nul
+)
+:backend_ready
+echo [OK] Gemini AI Engine is online and ready!
+echo.
 
 echo [2/2] Starting WhatsApp Connector...
 echo.

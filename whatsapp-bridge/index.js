@@ -43,15 +43,25 @@ let currentQRDataURL = null;
 let isConnected = false;
 let userPhone = null;
 const sentMessageIds = new Set();
+const processedMessageIds = new Set();
 const humanActiveUntil = new Map();
 const pendingReplyTimers = new Map();
 let lastOwnerActiveTime = 0;
 let isOwnerOnline = false;
 
-// 🛡️ E2EE Message Store & Retry Cache to prevent "Waiting for this message" error
-const msgRetryCounterCache = new NodeCache();
+// 🛡️ E2EE Message Store, Deduplication & Retry Cache to prevent "Waiting for this message" error
+const msgRetryCounterCache = new NodeCache({ stdTTL: 3600, useClones: false });
+const placeholderResendCache = new NodeCache({ stdTTL: 3600, useClones: false });
 const messageStore = new Map();
 const MAX_SAVED_MESSAGES = 3000;
+
+// 🛡️ OneDrive Safety: If project is inside OneDrive, store Baileys auth keys in UserProfile
+// to prevent OneDrive background sync from locking or corrupting Signal session keys.
+const defaultAuthDir = (process.platform === 'win32' && __dirname.toLowerCase().includes('onedrive') && process.env.USERPROFILE)
+  ? path.join(process.env.USERPROFILE, '.whatsapp_ai_baileys')
+  : path.join(__dirname, 'auth_info_baileys');
+
+const AUTH_DIR = process.env.AUTH_DIR || defaultAuthDir;
 
 function saveToMessageStore(id, message) {
   if (!id || !message) return;
@@ -285,7 +295,7 @@ function logToFile(msg) {
 }
 
 function clearAuthDirectory() {
-  const authDir = path.join(__dirname, 'auth_info_baileys');
+  const authDir = AUTH_DIR;
   try {
     if (fs.existsSync(authDir)) {
       const files = fs.readdirSync(authDir);
@@ -295,13 +305,23 @@ function clearAuthDirectory() {
         } catch (_) {}
       }
     }
+    // Also clean local auth folder if it exists and differs from AUTH_DIR
+    const localDir = path.join(__dirname, 'auth_info_baileys');
+    if (localDir !== authDir && fs.existsSync(localDir)) {
+      const lFiles = fs.readdirSync(localDir);
+      for (const file of lFiles) {
+        try {
+          fs.rmSync(path.join(localDir, file), { recursive: true, force: true });
+        } catch (_) {}
+      }
+    }
   } catch (err) {
     console.error('Error clearing auth directory contents:', err.message);
   }
 }
 
 function isSessionCorruptedOrUnregistered() {
-  const credsPath = path.join(__dirname, 'auth_info_baileys', 'creds.json');
+  const credsPath = path.join(AUTH_DIR, 'creds.json');
   try {
     if (fs.existsSync(credsPath)) {
       const raw = fs.readFileSync(credsPath, 'utf8');
@@ -378,7 +398,13 @@ async function startWhatsAppSocket() {
       sock = null;
     }
 
-    const { state, saveCreds } = await useMultiFileAuthState(path.join(__dirname, 'auth_info_baileys'));
+    if (!fs.existsSync(AUTH_DIR)) {
+      fs.mkdirSync(AUTH_DIR, { recursive: true });
+    }
+    console.log(`📂 [WhatsApp Auth] Using session directory: ${AUTH_DIR}`);
+    logToFile(`[WhatsApp Auth] Directory: ${AUTH_DIR}`);
+
+    const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
     const { version } = await fetchLatestBaileysVersion();
 
     sock = makeWASocket({
@@ -390,6 +416,7 @@ async function startWhatsAppSocket() {
         keys: makeCacheableSignalKeyStore(state.keys, logger),
       },
       msgRetryCounterCache,
+      placeholderResendCache,
       browser: Browsers.macOS('Desktop'),
       syncFullHistory: false,
       markOnlineOnConnect: false,
@@ -397,7 +424,8 @@ async function startWhatsAppSocket() {
       connectTimeoutMs: 60000,
       defaultQueryTimeoutMs: 60000,
       keepAliveIntervalMs: 25000,
-      retryRequestDelayMs: 2000,
+      retryRequestDelayMs: 500,
+      maxMsgRetryCount: 5,
       getMessage: async (key) => {
         if (key?.id && messageStore.has(key.id)) {
           return messageStore.get(key.id);
@@ -518,16 +546,33 @@ async function startWhatsAppSocket() {
     });
 
 
-    // E. Baileys messages.update (Status 4 = READ, Status 5 = PLAYED)
-    sock.ev.on('messages.update', (updates) => {
+    // E. Baileys messages.update (Status 4 = READ, Status 5 = PLAYED, or Decrypted ciphertext messages)
+    sock.ev.on('messages.update', async (updates) => {
       try {
         for (const u of updates) {
           const status = u.update?.status;
           if ((status === 4 || status === 5) && !u.key?.fromMe) {
             handleOwnerActivityDetected('Incoming message marked READ on phone', u.key?.remoteJid);
           }
+
+          // 🛡️ RECOVERED MESSAGE HANDLER:
+          // If a message was previously delayed by "Waiting for this message" (Ciphertext)
+          // and has now been decrypted by WhatsApp key exchange:
+          if (u.update?.message && !u.key?.fromMe) {
+            console.log(`✨ [Message Decrypted] Recovered delayed message ${u.key.id} after key sync! Processing with AI now...`);
+            logToFile(`[Message Decrypted] Recovered delayed message ${u.key.id}`);
+            const recoveredMsg = {
+              key: u.key,
+              message: u.update.message,
+              pushName: u.update.pushName,
+              messageTimestamp: u.update.messageTimestamp || Math.floor(Date.now() / 1000),
+            };
+            await handleIncomingMessage(recoveredMsg, 'recovered');
+          }
         }
-      } catch (_) {}
+      } catch (err) {
+        console.error('[messages.update error]:', err.message);
+      }
     });
 
     // F. Baileys message-receipt.update
@@ -582,286 +627,312 @@ async function startWhatsAppSocket() {
     });
 
     // ----------------------------------------------------
+    // Unified Inbound Message Processor (Used by both upsert & recovered update)
+    // ----------------------------------------------------
+    async function handleIncomingMessage(msg, origin = 'upsert') {
+      if (!msg || !msg.message) return;
+
+      const remoteJid = msg.key?.remoteJid;
+      if (!remoteJid || remoteJid.includes('@broadcast') || remoteJid.includes('@newsletter')) return;
+
+      if (msg.key?.id) {
+        saveToMessageStore(msg.key.id, msg.message);
+        if (processedMessageIds.has(msg.key.id)) {
+          return; // Already processed, prevent duplicates
+        }
+        processedMessageIds.add(msg.key.id);
+        if (processedMessageIds.size > 2000) {
+          const oldest = processedMessageIds.values().next().value;
+          processedMessageIds.delete(oldest);
+        }
+      }
+
+      let content = msg.message;
+      if (content?.ephemeralMessage) content = content.ephemeralMessage.message;
+      if (content?.viewOnceMessage) content = content.viewOnceMessage.message;
+      if (content?.viewOnceMessageV2) content = content.viewOnceMessageV2.message;
+      if (content?.documentWithCaptionMessage) content = content.documentWithCaptionMessage.message;
+
+      const text =
+        content?.conversation ||
+        content?.extendedTextMessage?.text ||
+        content?.imageMessage?.caption ||
+        content?.videoMessage?.caption ||
+        '';
+
+      // 🚫 GROUP CHAT & GROUP LINK PROTECTION:
+      const isGroupMessage = remoteJid.endsWith('@g.us') || 
+                             remoteJid.includes('@g.us') || 
+                             Boolean(msg.key?.participant) || 
+                             Boolean(msg.participant);
+
+      if (isGroupMessage) {
+        if (containsLink(text, content)) {
+          console.log(`🚫 [Group Link Blocked] Link detected in group chat (${remoteJid}). Meera AI will NOT respond or reply.`);
+          logToFile(`[Group Link Blocked] Suppressed reply for link in group (${remoteJid}): "${text}"`);
+          return;
+        }
+
+        const blacklist = getBlacklistConfig();
+        if (blacklist.ignore_all_groups !== false) {
+          return;
+        }
+      }
+
+      // Ignore messages sent by our AI bot
+      if (msg.key?.id && sentMessageIds.has(msg.key.id)) {
+        return;
+      }
+
+      const isSelf = isSelfChat(remoteJid);
+
+      // ====================================================
+      // 👤 OWNER SENT A MESSAGE (from phone or WhatsApp Web)
+      // ====================================================
+      if (msg.key?.fromMe) {
+        handleOwnerActivityDetected('Owner sent message', remoteJid);
+
+        const selfText = (
+          content?.conversation || 
+          content?.extendedTextMessage?.text || 
+          ''
+        ).trim().toLowerCase();
+
+        // WhatsApp Remote Commands (Send in self-chat)
+        if (selfText === '!off' || selfText === '!stop' || selfText === 'stop' || selfText === 'turn off ai') {
+          bridgeSettings.isAiPaused = true;
+          bridgeSettings.pauseUntil = 0;
+          saveSettings(bridgeSettings);
+          console.log(`🛑 [AI Stopped] Owner sent command "${selfText}". Meera AI is now STOPPED.`);
+          logToFile(`[AI Stopped] Owner sent command "${selfText}".`);
+          const reply = '🛑 *Meera AI is now STOPPED.*\n\nAI will NOT reply to any messages.\n\nSend *!on* or *start* anytime to resume.';
+          await sendSafeMessage(remoteJid, { text: reply });
+          return;
+        }
+
+        if (selfText === '!on' || selfText === '!start' || selfText === 'start' || selfText === 'turn on ai') {
+          bridgeSettings.isAiPaused = false;
+          bridgeSettings.pauseUntil = 0;
+          lastOwnerActiveTime = 0;
+          isOwnerOnline = false;
+          humanActiveUntil.clear();
+          saveSettings(bridgeSettings);
+          console.log(`▶️ [AI Resumed] Owner sent command "${selfText}". Meera AI is now ACTIVE.`);
+          logToFile(`[AI Resumed] Owner sent command "${selfText}".`);
+          const reply = '▶️ *Meera AI is now ACTIVE!*\n\nAI will automatically reply when you are offline for 16s, and stops immediately whenever you are active on WhatsApp.';
+          await sendSafeMessage(remoteJid, { text: reply });
+          return;
+        }
+
+        if (selfText === '!status') {
+          let statusText = '';
+          if (bridgeSettings.isAiPaused) {
+            statusText = '🛑 *Meera AI is currently STOPPED manually*.\n\nSend *!on* or *start* to activate.';
+          } else if (isOwnerOnline) {
+            statusText = '👤 *Meera AI is STOPPED because you are online in WhatsApp*.\n\nMeera will NOT reply while you are in WhatsApp. When you close WhatsApp, Meera will activate.';
+          } else {
+            statusText = '🟢 *Meera AI is ACTIVE & READY*.\n\nShe auto-replies when you close WhatsApp. Whenever you open WhatsApp, she stops immediately!';
+          }
+          await sendSafeMessage(remoteJid, { text: statusText });
+          return;
+        }
+
+        // 🛡️ CHAT TAKEOVER: You sent a message to a contact!
+        if (!isSelf) {
+          const takeoverMs = (bridgeSettings.chatTakeoverMinutes || 1) * 60 * 1000;
+          humanActiveUntil.set(remoteJid, Date.now() + takeoverMs);
+          const cleanRecipient = remoteJid.replace('@s.whatsapp.net', '').replace('@g.us', '').replace('@lid', '');
+          console.log(`👤 [Owner in WhatsApp] You sent a message to +${cleanRecipient}. Meera AI stopped in this chat for ${bridgeSettings.chatTakeoverMinutes || 1}m!`);
+          logToFile(`[Owner Active] Sent message to +${cleanRecipient}. AI stopped in this chat.`);
+        }
+        return;
+      }
+
+      // ====================================================
+      // 📥 INCOMING MESSAGE FROM ANOTHER CONTACT
+      // ====================================================
+      if (msg.status === 4 || msg.status === 5) {
+        handleOwnerActivityDetected('Incoming message already read on open chat', remoteJid);
+        return;
+      }
+
+      if (!text.trim()) return;
+
+      const senderPhone = remoteJid.replace('@s.whatsapp.net', '').replace('@g.us', '').replace('@lid', '');
+      const senderName = msg.pushName || (isSelf ? 'You' : 'WhatsApp User');
+
+      // Self-chat protection: ignore personal notes unless prefixed with !ai or !meera
+      if (isSelf) {
+        const lowerSelf = text.trim().toLowerCase();
+        const isExplicitAi = lowerSelf.startsWith('!ai ') || lowerSelf.startsWith('!meera ');
+        if (!isExplicitAi) {
+          return;
+        }
+      }
+
+      // Check blacklist
+      const blacklist = getBlacklistConfig();
+      const participant = msg.key?.participant ? msg.key.participant.replace('@s.whatsapp.net', '').replace('@lid', '') : null;
+      if (isNumberIgnored(senderPhone, blacklist.ignored_numbers) || (participant && isNumberIgnored(participant, blacklist.ignored_numbers))) {
+        const blockedNumber = isNumberIgnored(senderPhone, blacklist.ignored_numbers) ? senderPhone : participant;
+        console.log(`🚫 [Blacklist Active] Contact +${blockedNumber} is in blacklist. Skipping AI auto-reply.`);
+        return;
+      }
+
+      // Manual pause check
+      if (bridgeSettings.isAiPaused) {
+        console.log(`🛑 [AI Stopped] Meera is paused manually. Skipping message from +${senderPhone}.`);
+        return;
+      }
+
+      // 1. CHAT TAKEOVER CHECK: Are you chatting with this specific person?
+      const takeoverUntil = humanActiveUntil.get(remoteJid);
+      if (takeoverUntil && Date.now() < takeoverUntil && !isSelf) {
+        const remainingMin = Math.ceil((takeoverUntil - Date.now()) / 60000);
+        console.log(`👤 [Human Conversation Active] You are chatting with +${senderPhone}. Meera AI stopped in this chat (${remainingMin}m remaining).`);
+        logToFile(`[Human Conversation] Suppressed AI reply for +${senderPhone}. Owner active in chat.`);
+        return;
+      }
+
+      // 2. OWNER ONLINE CHECK:
+      const timeSinceOwnerActive = lastOwnerActiveTime > 0 ? (Date.now() - lastOwnerActiveTime) : Infinity;
+      const idleTimeoutMs = (bridgeSettings.ownerInactivitySeconds || 15) * 1000;
+      if (timeSinceOwnerActive >= idleTimeoutMs) {
+        isOwnerOnline = false;
+      }
+
+      if (isOwnerOnline && !isSelf) {
+        console.log(`👤 [Owner Online in WhatsApp] You are currently online in WhatsApp. Meera AI will NOT reply to message from +${senderPhone}.`);
+        logToFile(`[Owner Online] Suppressed AI reply for +${senderPhone}. Owner is online in WhatsApp.`);
+        return;
+      }
+
+      // 3. INBOUND BUFFER (0s = Instant reply when offline, bypass buffer on recovered messages):
+      const waitTimeMs = (origin === 'recovered') ? 0 : (bridgeSettings.inboundWaitSeconds || 0) * 1000;
+      if (waitTimeMs > 0) {
+        console.log(`⏳ [Inbound Buffer] Message received from +${senderPhone}. Waiting ${Math.ceil(waitTimeMs / 1000)}s buffer... If you open WhatsApp, AI reply will cancel.`);
+      } else {
+        console.log(`⚡ [Meera Instant] Owner offline. Replying instantly to +${senderPhone}...`);
+      }
+
+      const waitSecDisplay = Math.ceil(waitTimeMs / 1000);
+      const logHeader = isSelf ? `[Self-Chat Inbound]` : (origin === 'recovered' ? `[WhatsApp Recovered Inbound]` : `[WhatsApp Inbound]`);
+      const logLine = `${logHeader} From +${senderPhone} (${senderName}): "${text}" (Buffer: ${waitSecDisplay}s)`;
+      console.log(`\n📥 ` + logLine);
+      logToFile(logLine);
+
+      if (pendingReplyTimers.has(remoteJid)) {
+        clearTimeout(pendingReplyTimers.get(remoteJid).timeoutId);
+        pendingReplyTimers.delete(remoteJid);
+      }
+
+      const msgSnapshot = msg;
+      const capturedRemoteJid = remoteJid;
+      const capturedSenderPhone = senderPhone;
+      const capturedSenderName = senderName;
+      const capturedText = text;
+
+      const timeoutId = setTimeout(async () => {
+        pendingReplyTimers.delete(capturedRemoteJid);
+
+        if (bridgeSettings.isAiPaused) {
+          console.log(`🛑 [Cancelled AI Reply] Meera was stopped manually. Suppressed reply for +${capturedSenderPhone}.`);
+          return;
+        }
+
+        const checkTakeover = humanActiveUntil.get(capturedRemoteJid);
+        if (checkTakeover && Date.now() < checkTakeover) {
+          console.log(`👤 [Human Conversation Active] Owner chatted with +${capturedSenderPhone}. Suppressed AI reply.`);
+          return;
+        }
+
+        if (isOwnerOnline) {
+          console.log(`👤 [Cancelled AI Reply] Owner is online in WhatsApp. Suppressed AI reply for +${capturedSenderPhone}.`);
+          logToFile(`[Cancelled AI Reply] Suppressed reply for +${capturedSenderPhone}. Owner became online.`);
+          return;
+        }
+
+        console.log(`⚡ [Meera Auto-Activated] Generating AI reply for +${capturedSenderPhone} (${capturedSenderName})...`);
+        logToFile(`[Meera Auto-Activated] Generating reply for +${capturedSenderPhone}`);
+
+        try {
+          sock.sendPresenceUpdate('composing', capturedRemoteJid).catch(() => {});
+
+          // Forward message to FastAPI backend with auto-retry on ECONNREFUSED
+          let res = null;
+          for (let attempt = 1; attempt <= 3; attempt++) {
+            try {
+              res = await axios.post(FASTAPI_URL, {
+                sender_phone: capturedSenderPhone,
+                sender_name: capturedSenderName,
+                message_text: capturedText,
+                message_id: msgSnapshot.key?.id,
+              }, { timeout: 35000 });
+              break;
+            } catch (postErr) {
+              if (postErr.code === 'ECONNREFUSED' && attempt < 3) {
+                console.log(`⏳ [AI Backend Connecting] Backend on port 8000 warming up... retrying in 2s (${attempt}/3)`);
+                await new Promise(r => setTimeout(r, 2000));
+              } else {
+                throw postErr;
+              }
+            }
+          }
+
+          const finalTakeover = humanActiveUntil.get(capturedRemoteJid);
+          if (isOwnerOnline || (finalTakeover && Date.now() < finalTakeover) || bridgeSettings.isAiPaused) {
+            console.log(`👤 [Cancelled AI reply] Owner became active in WhatsApp while AI was generating. Suppressing reply to +${capturedSenderPhone}.`);
+            logToFile(`[Cancelled AI reply] Suppressed reply to +${capturedSenderPhone}. Owner became active.`);
+            try { await sock.sendPresenceUpdate('paused', capturedRemoteJid); } catch (_) {}
+            return;
+          }
+
+          if (res?.data?.reply) {
+            if (capturedRemoteJid.endsWith('@g.us') || capturedRemoteJid.includes('@g.us')) {
+              return;
+            }
+            const aiReply = res.data.reply;
+            console.log(`🤖 [Meera AI Outbound] Replying to +${capturedSenderPhone}:\n"${aiReply}"\n`);
+            logToFile(`[Outbound AI] Replying to +${capturedSenderPhone}: "${aiReply}"`);
+            await sendSafeMessage(capturedRemoteJid, { text: aiReply });
+            try { await sock.sendPresenceUpdate('paused', capturedRemoteJid); } catch (_) {}
+          } else if (res?.data?.handoff) {
+            console.log(`👤 [Handoff] Human takeover active for +${capturedSenderPhone}. AI reply suppressed.`);
+            logToFile(`[Handoff] Active for +${capturedSenderPhone}. AI reply suppressed.`);
+          }
+        } catch (err) {
+          console.error(`❌ [Error] Failed to process message with AI backend: ${err.message}`);
+          logToFile(`[Error] Failed to process message: ${err.message}`);
+        }
+      }, waitTimeMs);
+
+      pendingReplyTimers.set(capturedRemoteJid, {
+        timeoutId,
+        msgId: msgSnapshot.key?.id,
+        senderPhone: capturedSenderPhone
+      });
+    }
+
+    // ----------------------------------------------------
     // 2. Process Incoming & Outgoing Messages
     // ----------------------------------------------------
     sock.ev.on('messages.upsert', async (m) => {
       logToFile(`[messages.upsert] type=${m.type}, count=${m.messages?.length || 0}`);
 
       for (const msg of m.messages) {
-        if (!msg.message) continue;
-        if (msg.key?.id) {
-          saveToMessageStore(msg.key.id, msg.message);
-        }
-        const remoteJid = msg.key.remoteJid;
-        if (!remoteJid || remoteJid.includes('@broadcast') || remoteJid.includes('@newsletter')) continue;
-
-        let content = msg.message;
-        if (content?.ephemeralMessage) content = content.ephemeralMessage.message;
-        if (content?.viewOnceMessage) content = content.viewOnceMessage.message;
-        if (content?.viewOnceMessageV2) content = content.viewOnceMessageV2.message;
-        if (content?.documentWithCaptionMessage) content = content.documentWithCaptionMessage.message;
-
-        const text =
-          content?.conversation ||
-          content?.extendedTextMessage?.text ||
-          content?.imageMessage?.caption ||
-          content?.videoMessage?.caption ||
-          '';
-
-        // 🚫 GROUP CHAT & GROUP LINK PROTECTION:
-        // User rule: When links arrive in groups, Meera AI must NOT respond and must NOT reply!
-        const isGroupMessage = remoteJid.endsWith('@g.us') || 
-                               remoteJid.includes('@g.us') || 
-                               Boolean(msg.key.participant) || 
-                               Boolean(msg.participant);
-
-        if (isGroupMessage) {
-          if (containsLink(text, content)) {
-            console.log(`🚫 [Group Link Blocked] Link detected in group chat (${remoteJid}). Meera AI will NOT respond or reply.`);
-            logToFile(`[Group Link Blocked] Suppressed reply for link in group (${remoteJid}): "${text}"`);
-            continue; // Do NOT respond, do NOT reply!
-          }
-
-          // Check if all groups are ignored
-          const blacklist = getBlacklistConfig();
-          if (blacklist.ignore_all_groups !== false) {
-            continue;
-          }
-        }
-
-        // Ignore messages sent by our AI bot
-        if (msg.key.id && sentMessageIds.has(msg.key.id)) {
-          continue;
-        }
-
-        const isSelf = isSelfChat(remoteJid);
-
-        // ====================================================
-        // 👤 OWNER SENT A MESSAGE (from phone or WhatsApp Web)
-        // ====================================================
-        if (msg.key.fromMe) {
-          handleOwnerActivityDetected('Owner sent message', remoteJid);
-
-          const selfText = (
-            content?.conversation || 
-            content?.extendedTextMessage?.text || 
-            ''
-          ).trim().toLowerCase();
-
-          // WhatsApp Remote Commands (Send in self-chat)
-          if (selfText === '!off' || selfText === '!stop' || selfText === 'stop' || selfText === 'turn off ai') {
-            bridgeSettings.isAiPaused = true;
-            bridgeSettings.pauseUntil = 0;
-            saveSettings(bridgeSettings);
-            console.log(`🛑 [AI Stopped] Owner sent command "${selfText}". Meera AI is now STOPPED.`);
-            logToFile(`[AI Stopped] Owner sent command "${selfText}".`);
-            const reply = '🛑 *Meera AI is now STOPPED.*\n\nAI will NOT reply to any messages.\n\nSend *!on* or *start* anytime to resume.';
-            await sendSafeMessage(remoteJid, { text: reply });
-            continue;
-          }
-
-          if (selfText === '!on' || selfText === '!start' || selfText === 'start' || selfText === 'turn on ai') {
-            bridgeSettings.isAiPaused = false;
-            bridgeSettings.pauseUntil = 0;
-            lastOwnerActiveTime = 0;
-            isOwnerOnline = false;
-            humanActiveUntil.clear();
-            saveSettings(bridgeSettings);
-            console.log(`▶️ [AI Resumed] Owner sent command "${selfText}". Meera AI is now ACTIVE.`);
-            logToFile(`[AI Resumed] Owner sent command "${selfText}".`);
-            const reply = '▶️ *Meera AI is now ACTIVE!*\n\nAI will automatically reply when you are offline for 16s, and stops immediately whenever you are active on WhatsApp.';
-            await sendSafeMessage(remoteJid, { text: reply });
-            continue;
-          }
-
-          if (selfText === '!status') {
-            const opStatus = getAiOperationalStatus();
-            let statusText = '';
-            if (bridgeSettings.isAiPaused) {
-              statusText = '🛑 *Meera AI is currently STOPPED manually*.\n\nSend *!on* or *start* to activate.';
-            } else if (isOwnerOnline) {
-              statusText = '👤 *Meera AI is STOPPED because you are online in WhatsApp*.\n\nMeera will NOT reply while you are in WhatsApp. When you close WhatsApp, Meera will activate.';
-            } else {
-              statusText = '🟢 *Meera AI is ACTIVE & READY*.\n\nShe auto-replies when you close WhatsApp. Whenever you open WhatsApp, she stops immediately!';
-            }
-            await sendSafeMessage(remoteJid, { text: statusText });
-            continue;
-          }
-
-          // 🛡️ CHAT TAKEOVER: You sent a message to a contact!
-          // Protect this conversation from Meera for 5 minutes!
-          if (!isSelf) {
-            const takeoverMs = (bridgeSettings.chatTakeoverMinutes || 1) * 60 * 1000;
-            humanActiveUntil.set(remoteJid, Date.now() + takeoverMs);
-            const cleanRecipient = remoteJid.replace('@s.whatsapp.net', '').replace('@g.us', '').replace('@lid', '');
-            console.log(`👤 [Owner in WhatsApp] You sent a message to +${cleanRecipient}. Meera AI stopped in this chat for ${bridgeSettings.chatTakeoverMinutes || 1}m!`);
-            logToFile(`[Owner Active] Sent message to +${cleanRecipient}. AI stopped in this chat.`);
+        if (!msg.message) {
+          // If WhatsApp delivered a placeholder / ciphertext ("Waiting for this message"):
+          if (msg.key && sock?.requestPlaceholderResend) {
+            try {
+              sock.requestPlaceholderResend(msg.key).catch(() => {});
+              console.log(`🔄 [Auto-Resend Requested] Detected un-decrypted placeholder (${msg.key.id}). Sent resend request to phone.`);
+              logToFile(`[Placeholder Resend] Auto-requested resend for ${msg.key.id}`);
+            } catch (_) {}
           }
           continue;
         }
 
-        // ====================================================
-        // 📥 INCOMING MESSAGE FROM ANOTHER CONTACT
-        // ====================================================
-        // Check if message was already marked read on open chat screen
-        if (msg.status === 4 || msg.status === 5) {
-          handleOwnerActivityDetected('Incoming message already read on open chat', remoteJid);
-          continue;
-        }
-
-        if (!text.trim()) continue;
-
-        const senderPhone = remoteJid.replace('@s.whatsapp.net', '').replace('@g.us', '').replace('@lid', '');
-        const senderName = msg.pushName || (isSelf ? 'You' : 'WhatsApp User');
-
-        // Self-chat protection: ignore personal notes unless prefixed with !ai or !meera
-        if (isSelf) {
-          const lowerSelf = text.trim().toLowerCase();
-          const isExplicitAi = lowerSelf.startsWith('!ai ') || lowerSelf.startsWith('!meera ');
-          if (!isExplicitAi) {
-            continue;
-          }
-        }
-
-        // Check blacklist
-        const blacklist = getBlacklistConfig();
-        const participant = msg.key.participant ? msg.key.participant.replace('@s.whatsapp.net', '').replace('@lid', '') : null;
-        if (isNumberIgnored(senderPhone, blacklist.ignored_numbers) || (participant && isNumberIgnored(participant, blacklist.ignored_numbers))) {
-          const blockedNumber = isNumberIgnored(senderPhone, blacklist.ignored_numbers) ? senderPhone : participant;
-          console.log(`🚫 [Blacklist Active] Contact +${blockedNumber} is in blacklist. Skipping AI auto-reply.`);
-          continue;
-        }
-
-        // Manual pause check
-        if (bridgeSettings.isAiPaused) {
-          console.log(`🛑 [AI Stopped] Meera is paused manually. Skipping message from +${senderPhone}.`);
-          continue;
-        }
-
-        // 1. CHAT TAKEOVER CHECK: Are you chatting with this specific person?
-        const takeoverUntil = humanActiveUntil.get(remoteJid);
-        if (takeoverUntil && Date.now() < takeoverUntil && !isSelf) {
-          const remainingMin = Math.ceil((takeoverUntil - Date.now()) / 60000);
-          console.log(`👤 [Human Conversation Active] You are chatting with +${senderPhone}. Meera AI stopped in this chat (${remainingMin}m remaining).`);
-          logToFile(`[Human Conversation] Suppressed AI reply for +${senderPhone}. Owner active in chat.`);
-          continue;
-        }
-
-        // 2. OWNER ONLINE CHECK:
-        const timeSinceOwnerActive = lastOwnerActiveTime > 0 ? (Date.now() - lastOwnerActiveTime) : Infinity;
-        const idleTimeoutMs = (bridgeSettings.ownerInactivitySeconds || 15) * 1000;
-
-        // Auto-expire only if owner has been completely inactive for 15 seconds
-        if (timeSinceOwnerActive >= idleTimeoutMs) {
-          isOwnerOnline = false;
-        }
-
-        // When owner is online in WhatsApp: Strictly NO AI reply!
-        if (isOwnerOnline && !isSelf) {
-          console.log(`👤 [Owner Online in WhatsApp] You are currently online in WhatsApp. Meera AI will NOT reply to message from +${senderPhone}.`);
-          logToFile(`[Owner Online] Suppressed AI reply for +${senderPhone}. Owner is online in WhatsApp.`);
-          continue; // Strictly NO reply!
-        }
-
-        // 3. INBOUND BUFFER (0s = Instant reply when offline):
-        const waitTimeMs = (bridgeSettings.inboundWaitSeconds || 0) * 1000;
-        if (waitTimeMs > 0) {
-          console.log(`⏳ [Inbound Buffer] Message received from +${senderPhone}. Waiting ${Math.ceil(waitTimeMs / 1000)}s buffer... If you open WhatsApp, AI reply will cancel.`);
-        } else {
-          console.log(`⚡ [Meera Instant] Owner offline. Replying instantly to +${senderPhone}...`);
-        }
-
-        const waitSecDisplay = Math.ceil(waitTimeMs / 1000);
-        const logHeader = isSelf ? `[Self-Chat Inbound]` : `[WhatsApp Inbound]`;
-        const logLine = `${logHeader} From +${senderPhone} (${senderName}): "${text}" (Buffer: ${waitSecDisplay}s)`;
-        console.log(`\n📥 ` + logLine);
-        logToFile(logLine);
-
-        // Cancel any existing pending timer for this conversation
-        if (pendingReplyTimers.has(remoteJid)) {
-          clearTimeout(pendingReplyTimers.get(remoteJid).timeoutId);
-          pendingReplyTimers.delete(remoteJid);
-        }
-
-        const msgSnapshot = msg;
-        const capturedRemoteJid = remoteJid;
-        const capturedSenderPhone = senderPhone;
-        const capturedSenderName = senderName;
-        const capturedText = text;
-
-        const timeoutId = setTimeout(async () => {
-          pendingReplyTimers.delete(capturedRemoteJid);
-
-          // Post-wait check 1: Was AI paused manually?
-          if (bridgeSettings.isAiPaused) {
-            console.log(`🛑 [Cancelled AI Reply] Meera was stopped manually. Suppressed reply for +${capturedSenderPhone}.`);
-            return;
-          }
-
-          // Post-wait check 2: Did owner text this contact during the wait?
-          const checkTakeover = humanActiveUntil.get(capturedRemoteJid);
-          if (checkTakeover && Date.now() < checkTakeover) {
-            console.log(`👤 [Human Conversation Active] Owner chatted with +${capturedSenderPhone}. Suppressed AI reply.`);
-            return;
-          }
-
-          // Post-wait check 3: Did owner open WhatsApp or become online during the wait?
-          if (isOwnerOnline) {
-            console.log(`👤 [Cancelled AI Reply] Owner is online in WhatsApp. Suppressed AI reply for +${capturedSenderPhone}.`);
-            logToFile(`[Cancelled AI Reply] Suppressed reply for +${capturedSenderPhone}. Owner became online.`);
-            return;
-          }
-
-          // 🟢 OWNER IS OFFLINE: Meera Auto-Activates to help the contact!
-          console.log(`⚡ [Meera Auto-Activated] Generating instant AI reply for +${capturedSenderPhone} (${capturedSenderName})...`);
-          logToFile(`[Meera Auto-Activated] Generating reply for +${capturedSenderPhone}`);
-
-          try {
-            // Non-blocking composing presence so it doesn't add latency to the AI call
-            sock.sendPresenceUpdate('composing', capturedRemoteJid).catch(() => {});
-
-            // Forward message to FastAPI backend immediately
-            const res = await axios.post(FASTAPI_URL, {
-              sender_phone: capturedSenderPhone,
-              sender_name: capturedSenderName,
-              message_text: capturedText,
-              message_id: msgSnapshot.key.id,
-            }, { timeout: 35000 });
-
-            // CRITICAL RACE CONDITION CHECK:
-            // Did the owner open WhatsApp, read the chat, or send a message while Gemini was generating the reply?
-            const finalTakeover = humanActiveUntil.get(capturedRemoteJid);
-            if (isOwnerOnline || (finalTakeover && Date.now() < finalTakeover) || bridgeSettings.isAiPaused) {
-              console.log(`👤 [Cancelled AI reply] Owner became active in WhatsApp while AI was generating. Suppressing reply to +${capturedSenderPhone}.`);
-              logToFile(`[Cancelled AI reply] Suppressed reply to +${capturedSenderPhone}. Owner became active.`);
-              try { await sock.sendPresenceUpdate('paused', capturedRemoteJid); } catch (_) {}
-              return;
-            }
-
-            if (res.data?.reply) {
-              if (capturedRemoteJid.endsWith('@g.us') || capturedRemoteJid.includes('@g.us')) {
-                return;
-              }
-              const aiReply = res.data.reply;
-              console.log(`🤖 [Meera AI Outbound] Replying to +${capturedSenderPhone}:\n"${aiReply}"\n`);
-              logToFile(`[Outbound AI] Replying to +${capturedSenderPhone}: "${aiReply}"`);
-              await sendSafeMessage(capturedRemoteJid, { text: aiReply });
-              try { await sock.sendPresenceUpdate('paused', capturedRemoteJid); } catch (_) {}
-            } else if (res.data?.handoff) {
-              console.log(`👤 [Handoff] Human takeover active for +${capturedSenderPhone}. AI reply suppressed.`);
-              logToFile(`[Handoff] Active for +${capturedSenderPhone}. AI reply suppressed.`);
-            }
-          } catch (err) {
-            console.error(`❌ [Error] Failed to process message with AI backend: ${err.message}`);
-            logToFile(`[Error] Failed to process message: ${err.message}`);
-          }
-        }, waitTimeMs);
-
-        pendingReplyTimers.set(capturedRemoteJid, {
-          timeoutId,
-          msgId: msgSnapshot.key.id,
-          senderPhone: capturedSenderPhone
-        });
+        await handleIncomingMessage(msg, 'upsert');
       }
     });
 
