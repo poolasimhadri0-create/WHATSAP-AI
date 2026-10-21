@@ -100,8 +100,8 @@ function getSettings() {
     isAiPaused: false,
     pauseUntil: 0,
     inboundWaitSeconds: 0,        // Instant reply when owner is offline (no wait)
-    ownerInactivitySeconds: 300,  // 5 mins idle fallback (only activates when owner has closed WhatsApp)
-    chatTakeoverMinutes: 5,       // When owner texts someone, Meera stops in that chat for 5 mins
+    ownerInactivitySeconds: 15,   // 15 seconds idle fallback (auto-activates quickly after owner closes WhatsApp)
+    chatTakeoverMinutes: 1,       // When owner texts someone, Meera stops in that chat for 1 min
   };
   try {
     if (fs.existsSync(SETTINGS_FILE)) {
@@ -197,7 +197,7 @@ function handleOwnerActivityDetected(source, targetJid = null) {
 
   // If a specific conversation was interacted with, activate human takeover
   if (targetJid && !isSelfChat(targetJid)) {
-    const takeoverMs = (bridgeSettings.chatTakeoverMinutes || 5) * 60 * 1000;
+    const takeoverMs = (bridgeSettings.chatTakeoverMinutes || 1) * 60 * 1000;
     humanActiveUntil.set(targetJid, Date.now() + takeoverMs);
   }
 }
@@ -214,7 +214,7 @@ function handleOwnerOfflineDetected(source) {
 function getOwnerInactivityRemainingSeconds() {
   if (lastOwnerActiveTime <= 0) return 0;
   const elapsed = Date.now() - lastOwnerActiveTime;
-  const requiredMs = (bridgeSettings.ownerInactivitySeconds || 300) * 1000;
+  const requiredMs = (bridgeSettings.ownerInactivitySeconds || 15) * 1000;
   if (elapsed >= requiredMs) return 0;
   return Math.ceil((requiredMs - elapsed) / 1000);
 }
@@ -249,10 +249,10 @@ function getAiOperationalStatus() {
   }
 
   // 2. Owner Online / Active Check:
-  const idleTimeoutMs = (bridgeSettings.ownerInactivitySeconds || 300) * 1000;
+  const idleTimeoutMs = (bridgeSettings.ownerInactivitySeconds || 15) * 1000;
   const timeSinceActive = lastOwnerActiveTime > 0 ? (Date.now() - lastOwnerActiveTime) : Infinity;
 
-  // Auto-expire only if owner has been completely inactive for 5 minutes (300s)
+  // Auto-expire only if owner has been completely inactive for 15 seconds
   if (timeSinceActive >= idleTimeoutMs) {
     isOwnerOnline = false;
   }
@@ -691,10 +691,10 @@ async function startWhatsAppSocket() {
           // 🛡️ CHAT TAKEOVER: You sent a message to a contact!
           // Protect this conversation from Meera for 5 minutes!
           if (!isSelf) {
-            const takeoverMs = (bridgeSettings.chatTakeoverMinutes || 5) * 60 * 1000;
+            const takeoverMs = (bridgeSettings.chatTakeoverMinutes || 1) * 60 * 1000;
             humanActiveUntil.set(remoteJid, Date.now() + takeoverMs);
             const cleanRecipient = remoteJid.replace('@s.whatsapp.net', '').replace('@g.us', '').replace('@lid', '');
-            console.log(`👤 [Owner in WhatsApp] You sent a message to +${cleanRecipient}. Meera AI stopped in this chat for ${bridgeSettings.chatTakeoverMinutes || 5}m!`);
+            console.log(`👤 [Owner in WhatsApp] You sent a message to +${cleanRecipient}. Meera AI stopped in this chat for ${bridgeSettings.chatTakeoverMinutes || 1}m!`);
             logToFile(`[Owner Active] Sent message to +${cleanRecipient}. AI stopped in this chat.`);
           }
           continue;
@@ -749,9 +749,9 @@ async function startWhatsAppSocket() {
 
         // 2. OWNER ONLINE CHECK:
         const timeSinceOwnerActive = lastOwnerActiveTime > 0 ? (Date.now() - lastOwnerActiveTime) : Infinity;
-        const idleTimeoutMs = (bridgeSettings.ownerInactivitySeconds || 300) * 1000;
+        const idleTimeoutMs = (bridgeSettings.ownerInactivitySeconds || 15) * 1000;
 
-        // Auto-expire only if owner has been completely inactive for 5 minutes (300s)
+        // Auto-expire only if owner has been completely inactive for 15 seconds
         if (timeSinceOwnerActive >= idleTimeoutMs) {
           isOwnerOnline = false;
         }
@@ -1037,7 +1037,7 @@ app.get('/qr', (req, res) => {
       </div>
       <div class="info-row">
         <span class="info-label">When you message a contact:</span>
-        <span class="info-val" style="color:#ff5c6d;">Meera stops in that chat for 5 mins</span>
+        <span class="info-val" style="color:#ff5c6d;">Meera stops in that chat for 1 min</span>
       </div>
       <div class="info-row">
         <span class="info-label">Links in WhatsApp Groups:</span>
