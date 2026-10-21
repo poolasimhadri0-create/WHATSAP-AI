@@ -12,7 +12,7 @@ services:
       - key: LLM_PROVIDER
         value: gemini
       - key: LLM_MODEL
-        value: gemini-3.8-flash
+        value: gemini-flash-lite-latest
       - key: TYPING_DELAY_ENABLED
         value: "false"
       - key: FALLBACK_TO_SQLITE

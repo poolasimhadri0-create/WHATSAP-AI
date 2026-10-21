@@ -19,7 +19,7 @@ def get_gemini_client() -> httpx.AsyncClient:
     global _gemini_client
     if _gemini_client is None or _gemini_client.is_closed:
         _gemini_client = httpx.AsyncClient(
-            timeout=httpx.Timeout(connect=4.0, read=8.0, write=4.0, pool=5.0),
+            timeout=httpx.Timeout(connect=3.0, read=5.0, write=3.0, pool=4.0),
             limits=httpx.Limits(max_keepalive_connections=10, max_connections=20, keepalive_expiry=60.0),
             headers={"Content-Type": "application/json"}
         )
@@ -37,11 +37,11 @@ async def call_gemini_api(
     Reuses persistent HTTP connections and limits output tokens for snappy WhatsApp replies.
     """
     # Clean and prioritize fastest verified models
-    requested = model.replace("models/", "") if model else "gemini-3.8-flash"
+    requested = model.replace("models/", "") if model else "gemini-flash-lite-latest"
     candidate_models = []
     if requested:
         candidate_models.append(requested)
-    for verified in ["gemini-3.8-flash", "gemini-flash-latest", "gemini-flash-lite-latest", "gemini-3.1-flash-lite", "gemini-2.5-flash"]:
+    for verified in ["gemini-flash-lite-latest", "gemini-3.5-flash-lite", "gemini-flash-latest", "gemini-3.8-flash"]:
         if verified not in candidate_models:
             candidate_models.append(verified)
 
@@ -61,7 +61,7 @@ async def call_gemini_api(
         "contents": contents,
         "generationConfig": {
             "temperature": 0.7,
-            "maxOutputTokens": 90,
+            "maxOutputTokens": 250,
         }
     }
 
@@ -105,15 +105,25 @@ Language Mastery (CRITICAL INSTRUCTION):
      * "simhadri ekkada" -> "Simhadri konchem busy ga unnadu! Nenu tana personal AI Meera ni. Naku cheppu, emaina important message pass cheyala? 😉"
      * "nuvvu evaru" -> "Nenu Meera ni! Simhadri personal AI assistant ni. Tana badulu nenu ikkada chatting duty chestunna! How can I help you? ✨"
      * "party leda" -> "Party ah? Simhadri ni adagali, aayana eppudu busy antadu haha! 🥳"
-2. **English**:
+2. **Handling Short, Casual One-Word or Gibberish Messages**:
+   - If someone sends short casual messages like "hm", "hmm", "hmmm", "k", "ok", "ha", "avunu", "sare":
+     * DO NOT reply with a generic robotic message! Be playful, witty, and teasing:
+     * "hm" / "hmm" -> "Hm ante enti? One-letter mystery ah? 😉 Cheppu, em alochistunnav?"
+     * "k" -> "'K' ante okka aksharame, kani chala weight undi! 😂 Inka cheppu, em sangathulu?"
+     * "ha" / "avunu" -> "Super! Inka cheppu, em chestunnav ee roju? 😄"
+   - If someone sends random letters, typo spam, or gibberish (e.g., 'ggfsgf', 'asdfgh', 'hjhj', 'asdf'):
+     * Roast them playfully and tease them:
+     * e.g., "Adenti ala keyboard meda coffee padinattu type chestunnav? 😂 Sarigga cheppu, na AI brain confuse avtundi!"
+3. **English**:
    - If they text in English, reply in witty, warm, conversational English with humor and personality.
-3. **Telugu Script (తెలుగు)**:
+4. **Telugu Script (తెలుగు)**:
    - If they text in Telugu script, reply in natural Telugu script or friendly Roman Telugu.
-4. **General Indian Multilingual**:
+5. **General Indian Multilingual**:
    - Understand Hindi/Hinglish, Tamil, etc., and match their language naturally.
 
 WhatsApp Messaging Rules:
 - Keep messages short, punchy, and WhatsApp-friendly (1-2 sentences, max 3).
+- Always COMPLETE your sentences. Never stop or cut off mid-word.
 - Use fun emojis (😄, 😂, 😉, 🍕, ✨, 🙈, 🤙).
 - Don't write long essay lectures. Chat like real humans do on WhatsApp.
 - If someone jokes or teases you, give funny, witty, playful, and smart comebacks!
@@ -337,7 +347,30 @@ def generate_smart_fallback_reply(message: str, bot_config: Dict[str, str]) -> s
     """
     msg = message.lower().strip()
 
-    # 1. Telenglish / Telugu greetings & questions
+    # 1. Short or vague messages
+    if msg in ["hm", "hmm", "hmmm", "hmmmm", "mm", "mmm"]:
+        return "Hm ante enti? One-letter mystery ah? 😉 Cheppu, em alochistunnav? Meera ikkade undi! 🙈"
+    elif msg in ["k", "ok", "kk", "okk", "k k", "cool"]:
+        return "'K' ante okka aksharame, kani chala weight undi! 😂 Inka cheppu, em sangathulu?"
+    elif msg in ["ha", "haa", "avunu", "sare", "sarele", "alage"]:
+        return "Super! Inka cheppu, ee roju em specials mari? 😄"
+    elif msg in ["bye", "see you", "tata", "gn", "good night"]:
+        return "Aww, leaving already? Sare mari, take care! See you later! 👋✨"
+
+    # 2. Gibberish / Keyboard mash detection (e.g. 'ggfsgf', 'asdfgh', 'jkljk', or consonants mash)
+    is_gibberish = False
+    clean_alpha = re.sub(r"[^a-z]", "", msg)
+    if clean_alpha and len(clean_alpha) >= 4:
+        vowel_count = sum(1 for c in clean_alpha if c in "aeiou")
+        if vowel_count == 0 or (len(clean_alpha) >= 5 and vowel_count <= 1 and any(clean_alpha.count(c) >= 3 for c in set(clean_alpha))):
+            is_gibberish = True
+        elif any(cluster in clean_alpha for cluster in ["fsgf", "asdf", "qwer", "zxcv", "ghjk"]):
+            is_gibberish = True
+
+    if is_gibberish:
+        return "Adenti ala keyboard meda coffee padinattu type chestunnav? 😂 Sarigga cheppu, ardham kaledu!"
+
+    # 3. Telenglish / Telugu greetings & questions
     if any(w in msg for w in ["ela unnav", "ela unnaru", "baagunara", "bagunnava"]):
         return "Nenu super ga unnanu! Nuvvu ela unnav? Ee roju em specials mari? 😄"
     elif any(w in msg for w in ["em chestunnav", "em chestunnaru", "enti sangathulu", "enti visheshalu"]):
@@ -353,9 +386,10 @@ def generate_smart_fallback_reply(message: str, bot_config: Dict[str, str]) -> s
     elif any(w in msg for w in ["cheppu", "cheppandi", "cheppamma", "cheppu bro"]):
         return "Ha cheppu! Full listening mode lo unnanu. Em sangathulu? 👂😄"
 
-    # 2. General greetings
+    # 4. General greetings
     if any(w in msg for w in ["hi", "hello", "hey", "yo", "namaste", "good morning", "good evening"]):
         return "Hey! 👋 I'm Meera, Simhadri's personal AI assistant. Simhadri is currently occupied, but I'm here! Cheppu, how can I help you today? 😊"
 
-    return f"Nenu Meera ni! Simhadri busy ga unnapudu nenu messages chuskuntanu. I've noted your message: \"_{message}_\". Cheppu, emaina message pass cheyala Simhadri ki? ✨"
+    return "Nenu Meera ni! Simhadri ippudu konchem busy ga unnadu, nenu tana personal AI assistant ni. Cheppu, emaina message pass cheyala tanaki leda saradaaga matladatava? 😄✨"
+
 
