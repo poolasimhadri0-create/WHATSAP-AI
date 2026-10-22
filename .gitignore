@@ -21,6 +21,8 @@ __pycache__/
 *.db
 backend/whatsapp_ai.db
 whatsapp-bridge/auth_info_baileys/
+whatsapp-bridge/message_store.json
+**/message_store.json
 
 # Logs
 *.log

@@ -13,7 +13,7 @@ powershell -Command "$c = Get-NetTCPConnection -LocalPort 3001 -ErrorAction Sile
 
 echo.
 echo [3/3] Sending Test Question to Gemini AI...
-powershell -Command "$body = @{ sender_phone = '1234567890'; sender_name = 'Tester'; message_text = 'Hello, can you introduce yourself?' } | ConvertTo-Json; try { $res = Invoke-RestMethod -Uri 'http://localhost:8000/api/v1/bridge/incoming' -Method Post -ContentType 'application/json' -Body $body -TimeoutSec 15; Write-Host '  --> AI Status: WORKING PERFECTLY!' -ForegroundColor Green; Write-Host ''; Write-Host 'AI Response:' -ForegroundColor Cyan; Write-Host $res.reply; } catch { Write-Host '  --> Error:' $_.Exception.Message -ForegroundColor Red }"
+powershell -Command "$c = Get-NetTCPConnection -LocalPort 8000 -ErrorAction SilentlyContinue; if (-not $c) { Write-Host '  --> Note: AI Engine is NOT running. Double-click run_bot.bat to start both services!' -ForegroundColor Yellow; exit } $body = @{ sender_phone = '1234567890'; sender_name = 'Tester'; message_text = 'Hello, can you introduce yourself?' } | ConvertTo-Json; try { $res = Invoke-RestMethod -Uri 'http://localhost:8000/api/v1/bridge/incoming' -Method Post -ContentType 'application/json' -Body $body -TimeoutSec 15; Write-Host '  --> AI Status: WORKING PERFECTLY!' -ForegroundColor Green; Write-Host ''; Write-Host 'AI Response:' -ForegroundColor Cyan; [Console]::OutputEncoding = [System.Text.Encoding]::UTF8; Write-Host $res.reply; } catch { Write-Host '  --> Error:' $_.Exception.Message -ForegroundColor Red }"
 
 echo.
 echo ========================================================

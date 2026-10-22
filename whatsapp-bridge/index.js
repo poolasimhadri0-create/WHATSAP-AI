@@ -4,6 +4,7 @@ import makeWASocket, {
   fetchLatestBaileysVersion,
   Browsers,
   makeCacheableSignalKeyStore,
+  proto,
 } from '@whiskeysockets/baileys';
 import express from 'express';
 import cors from 'cors';
@@ -53,7 +54,7 @@ let isOwnerOnline = false;
 const msgRetryCounterCache = new NodeCache({ stdTTL: 3600, useClones: false });
 const placeholderResendCache = new NodeCache({ stdTTL: 3600, useClones: false });
 const messageStore = new Map();
-const MAX_SAVED_MESSAGES = 3000;
+const MAX_SAVED_MESSAGES = 5000;
 
 // 🛡️ OneDrive Safety: If project is inside OneDrive, store Baileys auth keys in UserProfile
 // to prevent OneDrive background sync from locking or corrupting Signal session keys.
@@ -62,6 +63,44 @@ const defaultAuthDir = (process.platform === 'win32' && __dirname.toLowerCase().
   : path.join(__dirname, 'auth_info_baileys');
 
 const AUTH_DIR = process.env.AUTH_DIR || defaultAuthDir;
+const MESSAGE_STORE_FILE = path.join(AUTH_DIR, 'message_store.json');
+
+function loadMessageStore() {
+  try {
+    if (fs.existsSync(MESSAGE_STORE_FILE)) {
+      const data = JSON.parse(fs.readFileSync(MESSAGE_STORE_FILE, 'utf-8'));
+      let count = 0;
+      for (const [id, msg] of Object.entries(data)) {
+        if (id && msg) {
+          messageStore.set(id, msg);
+          count++;
+        }
+      }
+      console.log(`📂 [MessageStore] Loaded ${count} cached E2EE messages from disk to prevent "Waiting for this message".`);
+      logToFile(`[MessageStore] Loaded ${count} cached messages from disk`);
+    }
+  } catch (err) {
+    console.error('⚠️ [MessageStore] Error loading message store:', err.message);
+  }
+}
+
+let saveStoreTimeout = null;
+function persistMessageStore() {
+  if (saveStoreTimeout) return;
+  saveStoreTimeout = setTimeout(() => {
+    saveStoreTimeout = null;
+    try {
+      if (!fs.existsSync(AUTH_DIR)) {
+        fs.mkdirSync(AUTH_DIR, { recursive: true });
+      }
+      const obj = {};
+      for (const [id, msg] of messageStore.entries()) {
+        obj[id] = msg;
+      }
+      fs.writeFileSync(MESSAGE_STORE_FILE, JSON.stringify(obj), 'utf-8');
+    } catch (_) {}
+  }, 1000);
+}
 
 function saveToMessageStore(id, message) {
   if (!id || !message) return;
@@ -70,7 +109,11 @@ function saveToMessageStore(id, message) {
     const oldestKey = messageStore.keys().next().value;
     messageStore.delete(oldestKey);
   }
+  persistMessageStore();
 }
+
+// Load message store on startup
+loadMessageStore();
 
 async function sendSafeMessage(jid, content, options = {}) {
   if (!sock) return null;
@@ -404,6 +447,12 @@ async function startWhatsAppSocket() {
     console.log(`📂 [WhatsApp Auth] Using session directory: ${AUTH_DIR}`);
     logToFile(`[WhatsApp Auth] Directory: ${AUTH_DIR}`);
 
+    if (isSessionCorruptedOrUnregistered()) {
+      console.log('⚠️ [WhatsApp Auth] Detected unlinked or corrupted credentials. Clearing stale session...');
+      logToFile('[WhatsApp Auth] Detected unlinked or corrupted credentials. Clearing stale session.');
+      clearAuthDirectory();
+    }
+
     const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
     const { version } = await fetchLatestBaileysVersion();
 
@@ -417,20 +466,23 @@ async function startWhatsAppSocket() {
       },
       msgRetryCounterCache,
       placeholderResendCache,
-      browser: Browsers.macOS('Desktop'),
+      browser: Browsers.ubuntu('Chrome'),
       syncFullHistory: false,
       markOnlineOnConnect: false,
       generateHighQualityLinkPreview: false,
       connectTimeoutMs: 60000,
       defaultQueryTimeoutMs: 60000,
       keepAliveIntervalMs: 25000,
-      retryRequestDelayMs: 500,
+      retryRequestDelayMs: 250,
       maxMsgRetryCount: 5,
       getMessage: async (key) => {
-        if (key?.id && messageStore.has(key.id)) {
-          return messageStore.get(key.id);
+        const id = key?.id;
+        if (id && messageStore.has(id)) {
+          return messageStore.get(id);
         }
-        return undefined; // Must return undefined so Baileys does not corrupt the retry
+        // Fallback to empty proto so Baileys can re-transmit and signal session ratchet can advance
+        // instead of getting permanently stuck in 'Waiting for this message'
+        return proto.Message.fromObject({});
       },
     });
 
@@ -561,6 +613,7 @@ async function startWhatsAppSocket() {
           if (u.update?.message && !u.key?.fromMe) {
             console.log(`✨ [Message Decrypted] Recovered delayed message ${u.key.id} after key sync! Processing with AI now...`);
             logToFile(`[Message Decrypted] Recovered delayed message ${u.key.id}`);
+            saveToMessageStore(u.key.id, u.update.message);
             const recoveredMsg = {
               key: u.key,
               message: u.update.message,
@@ -920,9 +973,13 @@ async function startWhatsAppSocket() {
       logToFile(`[messages.upsert] type=${m.type}, count=${m.messages?.length || 0}`);
 
       for (const msg of m.messages) {
+        if (msg.key?.id && msg.message) {
+          saveToMessageStore(msg.key.id, msg.message);
+        }
+
         if (!msg.message) {
           // If WhatsApp delivered a placeholder / ciphertext ("Waiting for this message"):
-          if (msg.key && sock?.requestPlaceholderResend) {
+          if (msg.key && typeof sock?.requestPlaceholderResend === 'function') {
             try {
               sock.requestPlaceholderResend(msg.key).catch(() => {});
               console.log(`🔄 [Auto-Resend Requested] Detected un-decrypted placeholder (${msg.key.id}). Sent resend request to phone.`);
@@ -1408,6 +1465,32 @@ app.post('/logout', async (req, res) => {
     return res.json({ success: true, message: 'Logged out. Ready for new QR scan.' });
   } catch (err) {
     return res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/reset-session', async (req, res) => {
+  try {
+    if (sock) {
+      try {
+        sock.ev.removeAllListeners();
+        sock.end();
+      } catch (_) {}
+      sock = null;
+    }
+    clearAuthDirectory();
+    isConnected = false;
+    currentQR = null;
+    currentQRDataURL = null;
+    userPhone = null;
+    setTimeout(startWhatsAppSocket, 1000);
+    return res.send(`
+      <html><body style="font-family:sans-serif;text-align:center;padding:50px;background:#0b141a;color:#fff;">
+        <h2 style="color:#25d366;">Session Reset Successfully!</h2>
+        <p>A fresh QR code is being generated. <a href="/qr" style="color:#53bdeb;">Click here to return to QR Code</a></p>
+      </body></html>
+    `);
+  } catch (err) {
+    return res.status(500).send(`Error resetting session: ${err.message}`);
   }
 });
 
