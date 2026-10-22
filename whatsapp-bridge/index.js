@@ -363,22 +363,6 @@ function clearAuthDirectory() {
   }
 }
 
-function isSessionCorruptedOrUnregistered() {
-  const credsPath = path.join(AUTH_DIR, 'creds.json');
-  try {
-    if (fs.existsSync(credsPath)) {
-      const raw = fs.readFileSync(credsPath, 'utf8');
-      const data = JSON.parse(raw);
-      if (data && data.registered === false) {
-        return true;
-      }
-    }
-  } catch (_) {
-    return true;
-  }
-  return false;
-}
-
 // ----------------------------------------------------
 // Blacklist / Ignored Numbers & Groups Configuration
 // ----------------------------------------------------
@@ -446,12 +430,6 @@ async function startWhatsAppSocket() {
     }
     console.log(`📂 [WhatsApp Auth] Using session directory: ${AUTH_DIR}`);
     logToFile(`[WhatsApp Auth] Directory: ${AUTH_DIR}`);
-
-    if (isSessionCorruptedOrUnregistered()) {
-      console.log('⚠️ [WhatsApp Auth] Detected unlinked or corrupted credentials. Clearing stale session...');
-      logToFile('[WhatsApp Auth] Detected unlinked or corrupted credentials. Clearing stale session.');
-      clearAuthDirectory();
-    }
 
     const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
     const { version } = await fetchLatestBaileysVersion();
